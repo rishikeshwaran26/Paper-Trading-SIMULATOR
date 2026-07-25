@@ -33,7 +33,7 @@ from datetime import date
 
 from flask import Blueprint, current_app, g, jsonify, request
 
-from engine import symbols
+from engine import backtest, symbols
 from engine.alerts import ABOVE, BELOW
 from engine.backtest import DEFAULT_THRESHOLD_PCT, DEFAULT_WINDOW_DAYS
 from engine.prices import NsePythonPriceSource, market_is_open
@@ -45,7 +45,7 @@ from engine.journal import (
 )
 from engine.manager import DEFAULT_STARTING_CASH
 from engine.portfolio import Portfolio
-from engine.repository import BacktestRepository, ScreenerRepository
+from engine.repository import BacktestRepository, BandStudyRepository, ScreenerRepository
 from engine.screener import BRACKETS
 
 from .auth import require_auth
@@ -60,6 +60,15 @@ UNIVERSE_CACHE_FILE = "nse_universe.csv"
 
 def screener_cache_path(root: str) -> str:
     return os.path.join(root, UNIVERSE_CACHE_FILE)
+
+
+# Where downloaded NSE bhavcopy day-files are cached, relative to the data root.
+BHAVCOPY_CACHE_DIR = "bhavcopy_cache"
+
+
+def bhavcopy_cache_dir(root: str) -> str:
+    return os.path.join(root, BHAVCOPY_CACHE_DIR)
+
 
 bp = Blueprint("api", __name__)
 
@@ -651,6 +660,89 @@ def get_backtest_run(run_id: int):
     detail = _backtest_repo().get_run(run_id)
     if detail is None:
         raise ApiError(404, "NotFound", f"no backtest run with id {run_id}")
+    return jsonify(detail)
+
+
+# --- band-touch study (Phase 1: tight band, date range, next-day-only) ------
+def _band_study_repo() -> BandStudyRepository:
+    return BandStudyRepository(db_file(g.data.root))
+
+
+@bp.post("/band-study/run")
+@require_auth
+def start_band_study():
+    """Scan a date range for stocks whose intraday move touched [band_low,
+    band_high]% and record what their very next trading day did. Runs in the
+    background; the client polls GET /band-study/status."""
+    body = json_body()
+    start_str = req_str(body, "start_date")
+    end_str = req_str(body, "end_date")
+    try:
+        start_date = date.fromisoformat(start_str)
+        end_date = date.fromisoformat(end_str)
+    except ValueError:
+        raise ApiError(400, "BadRequest", "'start_date'/'end_date' must be ISO dates, e.g. '2026-01-01'")
+    if start_date > end_date:
+        raise ApiError(400, "BadRequest", "'start_date' must not be after 'end_date'")
+    if end_date >= date.today():
+        raise ApiError(400, "BadRequest", "'end_date' must be in the past — there's nothing to replay yet")
+
+    direction = opt_str(body, "direction", "up")
+    if direction not in ("up", "down"):
+        raise ApiError(400, "BadRequest", "'direction' must be 'up' or 'down'")
+    band_low = float(body.get("band_low", backtest.DEFAULT_BAND_LOW))
+    band_high = float(body.get("band_high", backtest.DEFAULT_BAND_HIGH))
+    if not (0 < band_low < band_high <= 100):
+        raise ApiError(400, "BadRequest", "'band_low' must be less than 'band_high', both between 0 and 100")
+    source = opt_str(body, "source", "bhavcopy")
+    if source not in ("bhavcopy", "yahoo"):
+        raise ApiError(400, "BadRequest", "'source' must be 'bhavcopy' or 'yahoo'")
+
+    service = current_app.config["BAND_STUDY_SERVICE"]
+    data = current_app.config.get("BACKTEST_DATA")  # Yahoo: sole source for "yahoo", cross-check for "bhavcopy"
+    bhav_data = current_app.config.get("BHAVCOPY_DATA")
+    if source == "yahoo" and data is None:
+        raise ApiError(
+            503, "BandStudyUnavailable",
+            "the yahoo-sourced band study needs a live market data source; it's disabled in manual/offline mode",
+        )
+    if source == "bhavcopy" and bhav_data is None:
+        raise ApiError(503, "BandStudyUnavailable", "the bhavcopy data source is not configured")
+    started = service.start(
+        db_path=db_file(g.data.root),
+        cache_path=screener_cache_path(g.data.root),
+        data=data,
+        start_date=start_date,
+        end_date=end_date,
+        band_low=band_low,
+        band_high=band_high,
+        direction=direction,
+        source=source,
+        bhav_data=bhav_data,
+    )
+    if not started:
+        raise ApiError(409, "RunInProgress", "a band study is already running — check its status")
+    return jsonify({"started": True, "status": service.snapshot()}), 202
+
+
+@bp.get("/band-study/status")
+@require_auth
+def band_study_status():
+    return jsonify(current_app.config["BAND_STUDY_SERVICE"].snapshot())
+
+
+@bp.get("/band-study/runs")
+@require_auth
+def list_band_study_runs():
+    return jsonify({"runs": _band_study_repo().list_runs()})
+
+
+@bp.get("/band-study/runs/<int:run_id>")
+@require_auth
+def get_band_study_run(run_id: int):
+    detail = _band_study_repo().get_run(run_id)
+    if detail is None:
+        raise ApiError(404, "NotFound", f"no band study run with id {run_id}")
     return jsonify(detail)
 
 

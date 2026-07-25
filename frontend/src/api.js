@@ -143,4 +143,10 @@ export const api = {
   backtestStatus: () => request("/backtest/status"),
   listBacktestRuns: () => request("/backtest/runs"),
   getBacktestRun: (id) => request(`/backtest/runs/${enc(id)}`),
+
+  // band-touch study (Phase 1: tight band, date range, day-2-only)
+  runBandStudy: (payload) => request("/band-study/run", { method: "POST", body: JSON.stringify(payload) }),
+  bandStudyStatus: () => request("/band-study/status"),
+  listBandStudyRuns: () => request("/band-study/runs"),
+  getBandStudyRun: (id) => request(`/band-study/runs/${enc(id)}`),
 };

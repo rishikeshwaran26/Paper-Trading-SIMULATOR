@@ -21,6 +21,7 @@ from flask import Flask, jsonify
 from flask_cors import CORS
 
 from engine.backtest import YFinanceBacktestData
+from engine.bhavcopy import NSEBhavcopyData
 from engine.db import init_db
 from engine.prices import build_source
 from engine.screener import YFinanceScreenerData
@@ -29,9 +30,10 @@ from .auth import load_or_create_secret
 from .paths import db_file
 from .auth_routes import auth_bp
 from .backtest_service import BacktestService
+from .band_study_service import BandStudyService
 from .errors import register_error_handlers
 from .jobs import BackgroundWorker, should_start_worker
-from .routes import bp, screener_cache_path
+from .routes import bhavcopy_cache_dir, bp, screener_cache_path
 from .screener_service import ScreenerService
 
 DEFAULT_DATA_ROOT = "data"
@@ -83,6 +85,14 @@ def create_app(
     # provider (historical bars over an arbitrary date range, not "recent").
     app.config["BACKTEST_SERVICE"] = BacktestService()
     app.config["BACKTEST_DATA"] = None if mode == "manual" else YFinanceBacktestData()
+
+    # Band-touch study (Phase 1). Two sources: BACKTEST_DATA (Yahoo, above) for
+    # the "yahoo" path and for the bhavcopy path's narrow corporate-action
+    # cross-check; BHAVCOPY_DATA (NSE's own daily file) for the default,
+    # rate-limit-immune "bhavcopy" path. "manual" mode disables the network
+    # source but bhavcopy still reads from its local cache if one exists.
+    app.config["BAND_STUDY_SERVICE"] = BandStudyService()
+    app.config["BHAVCOPY_DATA"] = NSEBhavcopyData(bhavcopy_cache_dir(data_root))
 
     # Signing key for auth tokens. Persisted so a restart doesn't log you out.
     app.config["SECRET_KEY"] = load_or_create_secret(data_root)
@@ -160,6 +170,10 @@ def create_app(
                     "GET    /backtest/status",
                     "GET    /backtest/runs",
                     "GET    /backtest/runs/<id>",
+                    "POST   /band-study/run",
+                    "GET    /band-study/status",
+                    "GET    /band-study/runs",
+                    "GET    /band-study/runs/<id>",
                 ],
             }
         )

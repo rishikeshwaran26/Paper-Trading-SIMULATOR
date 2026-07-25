@@ -233,6 +233,10 @@ CREATE TABLE IF NOT EXISTS backtest_runs (
     mover_count    INTEGER NOT NULL DEFAULT 0,
     reverted_count INTEGER NOT NULL DEFAULT 0,
     reverted_pct   REAL,
+    -- symbols that failed to fetch even after a retry — never silently
+    -- dropped; a non-zero count here means this run's coverage is incomplete.
+    missing_count   INTEGER NOT NULL DEFAULT 0,
+    missing_symbols TEXT    NOT NULL DEFAULT '[]',
     error          TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_backtest_runs_date ON backtest_runs(target_date);
@@ -258,6 +262,68 @@ CREATE TABLE IF NOT EXISTS backtest_movers (
     PRIMARY KEY (run_id, symbol)
 );
 CREATE INDEX IF NOT EXISTS idx_backtest_movers_run ON backtest_movers(run_id);
+
+-- Band-touch studies: Phase-1 of the mean-reversion research — a tight %
+-- band (e.g. 19-20%) over a date range, one row per (touch_date, symbol), plus
+-- what its very next trading day did. Shared market data, same reasoning as
+-- screener_runs/backtest_runs.
+CREATE TABLE IF NOT EXISTS band_study_runs (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    start_date     TEXT NOT NULL,
+    end_date       TEXT NOT NULL,
+    band_low       REAL NOT NULL,
+    band_high      REAL NOT NULL,
+    direction      TEXT NOT NULL,            -- up | down
+    started_at     TEXT NOT NULL,
+    finished_at    TEXT,
+    status         TEXT NOT NULL,            -- running | done | error
+    universe_count INTEGER NOT NULL DEFAULT 0,
+    total_touches  INTEGER NOT NULL DEFAULT 0,
+    with_day2      INTEGER NOT NULL DEFAULT 0,
+    up_count       INTEGER NOT NULL DEFAULT 0,
+    down_count     INTEGER NOT NULL DEFAULT 0,
+    up_pct         REAL,
+    down_pct       REAL,
+    avg_day2_pct_up   REAL,
+    avg_day2_pct_down REAL,
+    -- symbols that failed to fetch even after a retry — never silently
+    -- dropped; a non-zero count here means this run's coverage is incomplete.
+    missing_count   INTEGER NOT NULL DEFAULT 0,
+    missing_symbols TEXT    NOT NULL DEFAULT '[]',
+    -- which data provider this run used: "yahoo" (per-symbol, rate-limit
+    -- prone) or "bhavcopy" (NSE's own daily file, one request per day).
+    source         TEXT NOT NULL DEFAULT 'yahoo',
+    error          TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_band_study_runs_dates ON band_study_runs(start_date, end_date);
+
+CREATE TABLE IF NOT EXISTS band_touches (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id              INTEGER NOT NULL REFERENCES band_study_runs(id) ON DELETE CASCADE,
+    symbol              TEXT    NOT NULL,
+    name                TEXT    NOT NULL DEFAULT '',
+    date                TEXT    NOT NULL,
+    direction           TEXT    NOT NULL,
+    prev_close          REAL    NOT NULL,
+    high                REAL    NOT NULL,
+    low                 REAL    NOT NULL,
+    touch_pct           REAL    NOT NULL,
+    close               REAL    NOT NULL,
+    close_pct           REAL    NOT NULL,
+    volume              INTEGER NOT NULL DEFAULT 0,
+    day2_date           TEXT,
+    day2_open           REAL,
+    day2_high           REAL,
+    day2_low            REAL,
+    day2_close          REAL,
+    day2_pct_change     REAL,
+    day2_open_close_pct REAL,
+    -- only meaningful on the bhavcopy path (raw, unadjusted prices): True if
+    -- Yahoo's adjusted % change disagrees sharply, suggesting a split/bonus
+    -- rather than a real market move. See cross_check_corporate_actions().
+    corporate_action_suspected INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_band_touches_run ON band_touches(run_id);
 """
 
 # Columns added to screener_movers after its first release. init_db ALTERs them
@@ -277,6 +343,22 @@ _SCREENER_MOVER_ADDED_COLUMNS = [
 _BACKTEST_MOVER_ADDED_COLUMNS = [
     ("spark", "TEXT NOT NULL DEFAULT '[]'"),
 ]
+
+# missing_count/missing_symbols: added to both run-tracking tables so a run
+# with incomplete data coverage (a fetch that failed even after retry) is
+# always visible, never silently indistinguishable from a fully clean run.
+_MISSING_SYMBOLS_COLUMNS = [
+    ("missing_count", "INTEGER NOT NULL DEFAULT 0"),
+    ("missing_symbols", "TEXT NOT NULL DEFAULT '[]'"),
+]
+
+# `source`: which data provider a band study used ("yahoo" | "bhavcopy") — old
+# rows predate the bhavcopy path entirely, so they default to "yahoo".
+_BAND_STUDY_SOURCE_COLUMN = [("source", "TEXT NOT NULL DEFAULT 'yahoo'")]
+
+# corporate_action_suspected: only meaningful on the bhavcopy path (raw,
+# unadjusted prices) — see cross_check_corporate_actions() in engine/backtest.py.
+_BAND_TOUCH_CORP_ACTION_COLUMN = [("corporate_action_suspected", "INTEGER NOT NULL DEFAULT 0")]
 
 
 def connect(db_path: str) -> sqlite3.Connection:
@@ -330,6 +412,10 @@ def init_db(db_path: str) -> None:
         _migrate_legacy_watchlist(conn)
         _migrate_added_columns(conn, "screener_movers", _SCREENER_MOVER_ADDED_COLUMNS)
         _migrate_added_columns(conn, "backtest_movers", _BACKTEST_MOVER_ADDED_COLUMNS)
+        _migrate_added_columns(conn, "backtest_runs", _MISSING_SYMBOLS_COLUMNS)
+        _migrate_added_columns(conn, "band_study_runs", _MISSING_SYMBOLS_COLUMNS)
+        _migrate_added_columns(conn, "band_study_runs", _BAND_STUDY_SOURCE_COLUMN)
+        _migrate_added_columns(conn, "band_touches", _BAND_TOUCH_CORP_ACTION_COLUMN)
 
 
 def _migrate_added_columns(conn: sqlite3.Connection, table: str, added: list[tuple[str, str]]) -> None:

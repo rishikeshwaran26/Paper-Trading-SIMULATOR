@@ -30,6 +30,7 @@ the spike — both computable from historical prices for any date.
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 from typing import Callable, Optional, Protocol
@@ -51,8 +52,51 @@ class BacktestData(Protocol):
 
     def history(self, tickers: list[str], start: date, end: date) -> dict[str, list[dict]]:
         """Daily bars per symbol between start and end (inclusive), oldest
-        first: [{date: "YYYY-MM-DD", close, volume}]."""
+        first: [{date: "YYYY-MM-DD", open, high, low, close, volume}].
+
+        open/high/low are what let a band-touch study tell "hit 19.5% intraday
+        then closed at 15%" apart from "closed at 19.5%" — the close-only shape
+        this module started with can't see the difference. Existing callers
+        that only read `close`/`volume` keep working unchanged.
+        """
         ...
+
+
+# --- reliable fetching ---------------------------------------------------------
+def _fetch_with_retry(
+    data: BacktestData, chunk: list[str], start: date, end: date, retries: int = 1
+) -> tuple[dict[str, list[dict]], list[str]]:
+    """Fetch one chunk, retrying only the symbols that came back empty.
+
+    Why this matters: Yahoo Finance is an unofficial, undocumented endpoint —
+    an individual symbol inside a 100-name batch can transiently fail (rate
+    limit, momentary hiccup) while the rest of the batch succeeds. Without a
+    retry, that symbol silently vanishes from the result with no indication
+    anything went wrong — for a study whose whole point is an accurate count,
+    a silent gap is worse than a slow one. One retry, after a short pause,
+    resolves the overwhelming majority of these; whatever is still missing
+    after that is reported back to the caller instead of hidden.
+    """
+    try:
+        history = data.history(chunk, start, end)
+    except Exception:
+        history = {}
+    missing = [s for s in chunk if not history.get(s)]
+
+    for attempt in range(retries):
+        if not missing:
+            break
+        time.sleep(1.5)  # give the upstream a moment before asking again
+        try:
+            retried = data.history(missing, start, end)
+        except Exception:
+            retried = {}
+        for sym, bars in retried.items():
+            if bars:
+                history[sym] = bars
+        missing = [s for s in missing if not history.get(s)]
+
+    return history, missing
 
 
 # --- result shapes -------------------------------------------------------------
@@ -131,6 +175,7 @@ class BacktestResult:
     window_days: int
     universe_count: int
     movers: list[BacktestMover] = field(default_factory=list)
+    missing_symbols: list[str] = field(default_factory=list)  # couldn't be fetched even after retry
 
     def summary(self) -> BacktestSummary:
         return _summarize(self.movers)
@@ -195,14 +240,13 @@ def run_backtest(
     tickers = [r["symbol"] for r in rows]
     name_of = {r["symbol"]: r.get("name", r["symbol"]) for r in rows}
     movers: list[BacktestMover] = []
+    missing_symbols: list[str] = []
     total = len(tickers)
 
     for start in range(0, total, chunk_size):
         chunk = tickers[start : start + chunk_size]
-        try:
-            history = data.history(chunk, lookback_start, lookahead_end)
-        except Exception:
-            history = {}
+        history, missing = _fetch_with_retry(data, chunk, lookback_start, lookahead_end)
+        missing_symbols.extend(missing)
         for sym in chunk:
             bars = history.get(sym) or []
             mover = _evaluate_symbol(
@@ -222,6 +266,7 @@ def run_backtest(
         window_days=window_days,
         universe_count=total,
         movers=movers,
+        missing_symbols=missing_symbols,
     )
 
 
@@ -315,6 +360,446 @@ def _evaluate_symbol(
     )
 
 
+# --- band-touch study (Phase 1: does the day AFTER a 19-20% touch tell us
+# anything?) ------------------------------------------------------------------
+# This is deliberately simpler than run_backtest()'s multi-week walk-forward:
+# one date range, one tight % band, one single "what happened the very next
+# day" measurement. The point is to prove the idea on a small, cheap slice
+# before scaling up to a longer window or a wider band (Phase 2+).
+#
+# "Touch" is checked against the day's INTRADAY HIGH (or LOW for a down-band),
+# not the close — a stock that spikes 19.5% intraday and fades back to close
+# +15% still belongs in the study. Close-only detection (what run_backtest
+# uses) would miss it entirely, which is exactly the gap this fixes.
+DEFAULT_BAND_LOW = 19.0
+DEFAULT_BAND_HIGH = 20.0
+
+
+@dataclass
+class BandTouch:
+    symbol: str
+    name: str
+    date: str            # the day it touched the band
+    direction: str        # "up" or "down"
+    prev_close: float
+    high: float
+    low: float
+    touch_pct: float       # % move that qualified it (vs the day's high, or low if down-band)
+    close: float
+    close_pct: float        # standard day change: close vs prev_close, for reference
+    volume: int
+
+    # the next trading day — None if the touch was the last day in our data
+    day2_date: Optional[str] = None
+    day2_open: Optional[float] = None
+    day2_high: Optional[float] = None
+    day2_low: Optional[float] = None
+    day2_close: Optional[float] = None
+    day2_pct_change: Optional[float] = None       # day2 close vs day1 close (the "did it fall" number)
+    day2_open_close_pct: Optional[float] = None   # day2's own session move — what an intraday short actually captures
+
+    # Only meaningful for the bhavcopy path (raw, unadjusted prices): True if
+    # Yahoo's split/bonus-ADJUSTED % change for this date disagrees sharply
+    # with bhavcopy's raw touch_pct — the tell-tale sign the "spike" was a
+    # corporate action (a mechanical price cut), not a real market move. See
+    # cross_check_corporate_actions().
+    corporate_action_suspected: bool = False
+
+    @property
+    def has_day2(self) -> bool:
+        return self.day2_close is not None
+
+    def to_dict(self) -> dict:
+        return {
+            "symbol": self.symbol,
+            "name": self.name,
+            "date": self.date,
+            "direction": self.direction,
+            "prev_close": self.prev_close,
+            "high": self.high,
+            "low": self.low,
+            "touch_pct": self.touch_pct,
+            "close": self.close,
+            "close_pct": self.close_pct,
+            "volume": self.volume,
+            "day2_date": self.day2_date,
+            "day2_open": self.day2_open,
+            "day2_high": self.day2_high,
+            "day2_low": self.day2_low,
+            "day2_close": self.day2_close,
+            "day2_pct_change": self.day2_pct_change,
+            "day2_open_close_pct": self.day2_open_close_pct,
+            "has_day2": self.has_day2,
+            "corporate_action_suspected": self.corporate_action_suspected,
+        }
+
+
+@dataclass
+class BandStudySummary:
+    """Up and down movers are tracked and averaged SEPARATELY on purpose — a
+    blended average would hide exactly the split the study exists to reveal."""
+
+    total_touches: int
+    with_day2: int
+    up_count: int
+    down_count: int
+    flat_count: int
+    up_pct: float
+    down_pct: float
+    avg_day2_pct_up: Optional[float]
+    avg_day2_pct_down: Optional[float]
+
+    def to_dict(self) -> dict:
+        return {
+            "total_touches": self.total_touches,
+            "with_day2": self.with_day2,
+            "up_count": self.up_count,
+            "down_count": self.down_count,
+            "flat_count": self.flat_count,
+            "up_pct": self.up_pct,
+            "down_pct": self.down_pct,
+            "avg_day2_pct_up": self.avg_day2_pct_up,
+            "avg_day2_pct_down": self.avg_day2_pct_down,
+        }
+
+
+@dataclass
+class BandStudyResult:
+    start_date: str
+    end_date: str
+    band_low: float
+    band_high: float
+    direction: str
+    universe_count: int
+    touches: list[BandTouch] = field(default_factory=list)
+    missing_symbols: list[str] = field(default_factory=list)  # couldn't be fetched even after retry
+
+    def summary(self) -> BandStudySummary:
+        return _summarize_band_touches(self.touches)
+
+
+def _summarize_band_touches(touches: list[BandTouch]) -> BandStudySummary:
+    n = len(touches)
+    scored = [t for t in touches if t.has_day2]
+    up = [t for t in scored if t.day2_pct_change > 0]
+    down = [t for t in scored if t.day2_pct_change < 0]
+    flat = [t for t in scored if t.day2_pct_change == 0]
+    with_day2 = len(scored)
+    return BandStudySummary(
+        total_touches=n,
+        with_day2=with_day2,
+        up_count=len(up),
+        down_count=len(down),
+        flat_count=len(flat),
+        up_pct=round(len(up) / with_day2 * 100, 1) if with_day2 else 0.0,
+        down_pct=round(len(down) / with_day2 * 100, 1) if with_day2 else 0.0,
+        avg_day2_pct_up=round(sum(t.day2_pct_change for t in up) / len(up), 2) if up else None,
+        avg_day2_pct_down=round(sum(t.day2_pct_change for t in down) / len(down), 2) if down else None,
+    )
+
+
+def _trading_days_buffer(days: int) -> timedelta:
+    """Calendar-day padding that comfortably covers `days` TRADING days,
+    accounting for weekends/holidays."""
+    return timedelta(days=int(days * 1.6) + 10)
+
+
+def scan_band_touches(
+    rows: list[dict],
+    data: BacktestData,
+    start_date: date,
+    end_date: date,
+    band_low: float = DEFAULT_BAND_LOW,
+    band_high: float = DEFAULT_BAND_HIGH,
+    direction: str = "up",
+    min_volume: int = DEFAULT_MIN_VOLUME,
+    chunk_size: int = 100,
+    progress: Optional[Callable[[int, int, str], None]] = None,
+) -> BandStudyResult:
+    """For every trading day in [start_date, end_date], find every stock whose
+    intraday move touched [band_low, band_high]%, then record what its VERY
+    NEXT trading day did. `rows` is [{symbol, name}] — the universe to scan.
+    """
+    lookback_start = start_date - timedelta(days=10)  # just enough for a prev_close before start_date
+    lookahead_end = end_date + _trading_days_buffer(2)  # a day or two past end_date, for day2 on the last date
+
+    tickers = [r["symbol"] for r in rows]
+    name_of = {r["symbol"]: r.get("name", r["symbol"]) for r in rows}
+    touches: list[BandTouch] = []
+    missing_symbols: list[str] = []
+    total = len(tickers)
+
+    for start in range(0, total, chunk_size):
+        chunk = tickers[start : start + chunk_size]
+        history, missing = _fetch_with_retry(data, chunk, lookback_start, lookahead_end)
+        missing_symbols.extend(missing)
+        for sym in chunk:
+            bars = history.get(sym) or []
+            touches.extend(
+                _touches_for_symbol(
+                    sym, name_of.get(sym, sym), bars, start_date, end_date,
+                    band_low, band_high, direction, min_volume,
+                )
+            )
+        if progress:
+            done = min(start + chunk_size, total)
+            progress(done, total, f"Scanned {done}/{total} stocks for {start_date.isoformat()}–{end_date.isoformat()}")
+
+    return BandStudyResult(
+        start_date=start_date.isoformat(),
+        end_date=end_date.isoformat(),
+        band_low=band_low,
+        band_high=band_high,
+        direction=direction,
+        universe_count=total,
+        touches=touches,
+        missing_symbols=missing_symbols,
+    )
+
+
+def _touches_for_symbol(
+    symbol: str,
+    name: str,
+    bars: list[dict],
+    start_date: date,
+    end_date: date,
+    band_low: float,
+    band_high: float,
+    direction: str,
+    min_volume: int,
+) -> list[BandTouch]:
+    out: list[BandTouch] = []
+    start_iso, end_iso = start_date.isoformat(), end_date.isoformat()
+    for i in range(1, len(bars)):  # start at 1: every bar needs a previous close
+        bar = bars[i]
+        if not (start_iso <= bar["date"] <= end_iso):
+            continue
+        prev_close = bars[i - 1]["close"]
+        if not prev_close or prev_close <= 0:
+            continue
+        high, low, close = bar.get("high"), bar.get("low"), bar.get("close")
+        volume = int(bar.get("volume") or 0)
+        if volume < min_volume:
+            continue
+
+        if direction == "up":
+            touch_pct = round((high - prev_close) / prev_close * 100, 2)
+            qualifies = band_low <= touch_pct <= band_high
+        else:
+            touch_pct = round((low - prev_close) / prev_close * 100, 2)
+            qualifies = -band_high <= touch_pct <= -band_low
+        if not qualifies:
+            continue
+
+        close_pct = round((close - prev_close) / prev_close * 100, 2)
+        touch = BandTouch(
+            symbol=symbol,
+            name=name,
+            date=bar["date"],
+            direction=direction,
+            prev_close=round(prev_close, 2),
+            high=round(high, 2),
+            low=round(low, 2),
+            touch_pct=touch_pct,
+            close=round(close, 2),
+            close_pct=close_pct,
+            volume=volume,
+        )
+
+        if i + 1 < len(bars):
+            day2 = bars[i + 1]
+            d2_close = day2.get("close")
+            d2_open = day2.get("open")
+            if d2_close is not None:
+                touch.day2_date = day2["date"]
+                touch.day2_open = round(d2_open, 2) if d2_open is not None else None
+                touch.day2_high = round(day2["high"], 2) if day2.get("high") is not None else None
+                touch.day2_low = round(day2["low"], 2) if day2.get("low") is not None else None
+                touch.day2_close = round(d2_close, 2)
+                touch.day2_pct_change = round((d2_close - close) / close * 100, 2)
+                if d2_open:
+                    touch.day2_open_close_pct = round((d2_close - d2_open) / d2_open * 100, 2)
+
+        out.append(touch)
+    return out
+
+
+# --- bhavcopy-backed band study: broad-then-narrow ---------------------------
+# The whole point of this pipeline: NSE's bhavcopy answers "who touched the
+# band, across the WHOLE exchange, for a WHOLE month" in ~20 file downloads
+# (one per trading day) instead of ~2,000 Yahoo per-symbol lookups — and it's
+# the exchange's own authoritative, unadjusted tape. The one thing it can't
+# tell us is whether a "touch" was a real price move or a mechanical split/
+# bonus cut, because bhavcopy prices are NOT adjusted for corporate actions.
+# So: scan broad with bhavcopy (fast, ~2,000 symbols), then cross-check ONLY
+# the handful of resulting touches (typically under 100) against Yahoo's
+# split/bonus-ADJUSTED prices for the same dates — a narrow, cheap lookup
+# that Yahoo's rate limit has no trouble with.
+CORPORATE_ACTION_DIVERGENCE_PCT = 5.0  # bhavcopy vs Yahoo-adjusted gap that flags a touch
+
+
+class BhavcopyProvider(Protocol):
+    """What the bhavcopy scan needs. Matches engine.bhavcopy.NSEBhavcopyData —
+    typed narrowly here so this module doesn't import bhavcopy.py directly
+    (keeps the dependency direction one-way: bhavcopy depends on nothing here
+    except the BacktestData protocol it implements)."""
+
+    def full_day(self, d: date) -> list[dict]:
+        """Every EQ-series row for one trading day: [{symbol, date, open, high,
+        low, close, prev_close, volume}]. Empty list if not a trading day."""
+        ...
+
+
+def scan_band_touches_bhavcopy(
+    rows: list[dict],
+    bhav: BhavcopyProvider,
+    yf_data: Optional[BacktestData],
+    start_date: date,
+    end_date: date,
+    band_low: float = DEFAULT_BAND_LOW,
+    band_high: float = DEFAULT_BAND_HIGH,
+    direction: str = "up",
+    min_volume: int = DEFAULT_MIN_VOLUME,
+    progress: Optional[Callable[[int, int, str], None]] = None,
+) -> BandStudyResult:
+    """Same question as scan_band_touches() — which stocks touched the band,
+    what did day 2 do — answered via NSE's own daily bhavcopy instead of
+    per-symbol Yahoo queries. `rows` supplies symbol->name only; the actual
+    day-by-day universe comes from whatever bhavcopy itself lists that day
+    (more authoritative than any separately-maintained symbol list).
+    """
+    name_of = {r["symbol"]: r.get("name", r["symbol"]) for r in rows}
+
+    total_days = (end_date - start_date).days + 1
+    touches: list[BandTouch] = []
+    day_cache: dict[str, dict[str, dict]] = {}  # date iso -> {symbol: row}, populated as we walk
+
+    def day_rows(d: date) -> dict[str, dict]:
+        key = d.isoformat()
+        if key not in day_cache:
+            day_cache[key] = {r["symbol"]: r for r in bhav.full_day(d)}
+        return day_cache[key]
+
+    def next_trading_day_rows(after: date, max_lookahead: int = 10) -> tuple[Optional[date], dict[str, dict]]:
+        """Walk forward from `after` until we find an actual trading day (skips
+        weekends/holidays, which bhavcopy reports as empty — see engine.bhavcopy)."""
+        for offset in range(1, max_lookahead + 1):
+            d = after + timedelta(days=offset)
+            rows_for_day = day_rows(d)
+            if rows_for_day:
+                return d, rows_for_day
+        return None, {}
+
+    d = start_date
+    day_num = 0
+    while d <= end_date:
+        day_num += 1
+        rows_today = day_rows(d)
+        if progress:
+            progress(day_num, total_days, f"Scanned {d.isoformat()} ({day_num}/{total_days} days)")
+        if not rows_today:
+            d += timedelta(days=1)
+            continue
+
+        day2_date, day2_rows = None, None  # computed lazily, shared across every touch found today
+
+        for sym, row in rows_today.items():
+            prev_close = row.get("prev_close")
+            high, low, close = row.get("high"), row.get("low"), row.get("close")
+            volume = int(row.get("volume") or 0)
+            if not prev_close or prev_close <= 0 or volume < min_volume:
+                continue
+
+            if direction == "up":
+                touch_pct = round((high - prev_close) / prev_close * 100, 2)
+                qualifies = band_low <= touch_pct <= band_high
+            else:
+                touch_pct = round((low - prev_close) / prev_close * 100, 2)
+                qualifies = -band_high <= touch_pct <= -band_low
+            if not qualifies:
+                continue
+
+            close_pct = round((close - prev_close) / prev_close * 100, 2)
+            touch = BandTouch(
+                symbol=sym, name=name_of.get(sym, sym), date=d.isoformat(), direction=direction,
+                prev_close=round(prev_close, 2), high=round(high, 2), low=round(low, 2),
+                touch_pct=touch_pct, close=round(close, 2), close_pct=close_pct, volume=volume,
+            )
+
+            if day2_rows is None:
+                day2_date, day2_rows = next_trading_day_rows(d)
+            day2_row = (day2_rows or {}).get(sym)
+            if day2_row:
+                d2_open, d2_close = day2_row.get("open"), day2_row.get("close")
+                if d2_close is not None:
+                    touch.day2_date = day2_date.isoformat()
+                    touch.day2_open = round(d2_open, 2) if d2_open is not None else None
+                    touch.day2_high = round(day2_row["high"], 2) if day2_row.get("high") is not None else None
+                    touch.day2_low = round(day2_row["low"], 2) if day2_row.get("low") is not None else None
+                    touch.day2_close = round(d2_close, 2)
+                    touch.day2_pct_change = round((d2_close - close) / close * 100, 2)
+                    if d2_open:
+                        touch.day2_open_close_pct = round((d2_close - d2_open) / d2_open * 100, 2)
+
+            touches.append(touch)
+        d += timedelta(days=1)
+
+    if yf_data is not None:
+        cross_check_corporate_actions(touches, yf_data)
+
+    return BandStudyResult(
+        start_date=start_date.isoformat(), end_date=end_date.isoformat(),
+        band_low=band_low, band_high=band_high, direction=direction,
+        universe_count=len(rows), touches=touches, missing_symbols=[],
+    )
+
+
+def cross_check_corporate_actions(
+    touches: list[BandTouch], yf_data: BacktestData, threshold_pct: float = CORPORATE_ACTION_DIVERGENCE_PCT
+) -> None:
+    """Mutates `touches` in place, setting corporate_action_suspected=True on
+    any whose bhavcopy (raw) close_pct disagrees with Yahoo's (split/bonus-
+    ADJUSTED) close_pct by more than `threshold_pct` points.
+
+    This is the narrow half of the pipeline — typically under 100 symbols,
+    each needing only a couple of days of history, so it's cheap regardless
+    of how throttled Yahoo is for large batches.
+    """
+    if not touches:
+        return
+    by_symbol: dict[str, list[BandTouch]] = {}
+    for t in touches:
+        by_symbol.setdefault(t.symbol, []).append(t)
+
+    symbols = list(by_symbol.keys())
+    dates = [date.fromisoformat(t.date) for t in touches]
+    start = min(dates) - timedelta(days=5)
+    end = max(dates) + timedelta(days=2)
+
+    try:
+        history = yf_data.history(symbols, start, end)
+    except Exception:
+        return  # cross-check is a safety NET, not a hard dependency — never block the study over it
+
+    for sym, sym_touches in by_symbol.items():
+        bars = {b["date"]: b for b in history.get(sym, [])}
+        for t in sym_touches:
+            bar = bars.get(t.date)
+            if bar is None:
+                continue  # Yahoo has no data for this date — nothing to compare, leave unflagged
+            prev_bar_close = None
+            # find the bar immediately before t.date in this symbol's series
+            sorted_dates = sorted(bars.keys())
+            idx = sorted_dates.index(t.date) if t.date in sorted_dates else -1
+            if idx > 0:
+                prev_bar_close = bars[sorted_dates[idx - 1]]["close"]
+            if not prev_bar_close:
+                continue
+            yahoo_close_pct = (bar["close"] - prev_bar_close) / prev_bar_close * 100
+            if abs(yahoo_close_pct - t.close_pct) > threshold_pct:
+                t.corporate_action_suspected = True
+
+
 # --- the real (yfinance) data provider --------------------------------------
 class YFinanceBacktestData:
     """BacktestData backed by yfinance's historical daily bars — the same
@@ -346,6 +831,9 @@ class YFinanceBacktestData:
         for sym, yt in zip(tickers, yts):
             try:
                 sub = data[yt] if yt in getattr(data, "columns", []) else data
+                opens = sub["Open"]
+                highs = sub["High"]
+                lows = sub["Low"]
                 closes = sub["Close"]
                 vols = sub["Volume"]
                 bars = []
@@ -353,10 +841,16 @@ class YFinanceBacktestData:
                     c = closes.get(idx)
                     if c is None or c != c:  # NaN
                         continue
+                    o = opens.get(idx)
+                    h = highs.get(idx)
+                    lo = lows.get(idx)
                     v = vols.get(idx)
                     bars.append(
                         {
                             "date": idx.strftime("%Y-%m-%d"),
+                            "open": float(o) if o == o else float(c),
+                            "high": float(h) if h == h else float(c),
+                            "low": float(lo) if lo == lo else float(c),
                             "close": float(c),
                             "volume": int(v) if v == v else 0,
                         }

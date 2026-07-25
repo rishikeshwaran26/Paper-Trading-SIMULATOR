@@ -107,15 +107,15 @@ class BacktestService:
             )
             repo.finish_run(run_id, result)
             summary = result.summary()
-            self._set(
-                status="done", percent=100,
-                message=(
-                    f"{summary.mover_count} movers found — "
-                    f"{summary.reverted_pct}% reverted within {window_days} days"
-                    if summary.mover_count else "No qualifying movers on that date"
-                ),
-                finished_at=datetime.now(IST).isoformat(),
+            message = (
+                f"{summary.mover_count} movers found — "
+                f"{summary.reverted_pct}% reverted within {window_days} days"
+                if summary.mover_count else "No qualifying movers on that date"
             )
+            if result.missing_symbols:
+                # Never silent: a run's coverage is only as good as its data.
+                message += f" ({len(result.missing_symbols)} symbols could not be fetched)"
+            self._set(status="done", percent=100, message=message, finished_at=datetime.now(IST).isoformat())
         except Exception as e:  # a run blowing up must not kill the thread silently
             if run_id is not None:
                 try:
