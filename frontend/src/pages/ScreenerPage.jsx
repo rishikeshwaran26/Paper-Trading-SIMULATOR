@@ -44,12 +44,15 @@ const FILTERS = {
 
 const DEFAULT_FILTERS = { direction: "all", move: "all", perf: "all", rsi: "all", macd: "all" };
 
-// Deterministic pastel colour for a symbol's initial-letter avatar (we have no
-// real logo source; a coloured initial is honest and needs no network).
+// Deterministic greyscale shade for a symbol's initial-letter avatar (we have
+// no real logo source; a neutral initial keeps the monochrome look while still
+// giving each row a slightly distinct chip). Lightness varies by hash so
+// different symbols aren't identical, but it stays in a dark professional band.
 function avatarColor(sym) {
   let h = 0;
-  for (let i = 0; i < sym.length; i++) h = (h * 31 + sym.charCodeAt(i)) % 360;
-  return `hsl(${h}, 45%, 42%)`;
+  for (let i = 0; i < sym.length; i++) h = (h * 31 + sym.charCodeAt(i)) % 100;
+  const lightness = 20 + (h % 22); // 20%–42%: dark greys, white initial stays legible
+  return `hsl(0, 0%, ${lightness}%)`;
 }
 
 export default function ScreenerPage() {

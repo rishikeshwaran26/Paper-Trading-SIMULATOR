@@ -35,9 +35,10 @@ export default function PriceChart({ symbol, avgPrice }) {
   const change = first != null && last != null ? last - first : null;
   const changePct = change != null && first ? (change / first) * 100 : null;
 
-  // Colour the area by whether the period was up or down overall.
+  // Colour the area by whether the period was up or down overall — the muted
+  // green/red are the only colours in the app, reserved for money direction.
   const up = (change ?? 0) >= 0;
-  const stroke = up ? "#22c55e" : "#ef4444";
+  const stroke = up ? "#157f3c" : "#c1121f";
 
   return (
     <section className="card chart-card">
@@ -84,26 +85,26 @@ export default function PriceChart({ symbol, avgPrice }) {
                   <stop offset="100%" stopColor={stroke} stopOpacity={0} />
                 </linearGradient>
               </defs>
-              <CartesianGrid strokeDasharray="3 3" stroke="#2a3346" />
-              <XAxis dataKey="date" tick={{ fontSize: 11 }} minTickGap={30} />
+              <CartesianGrid strokeDasharray="3 3" stroke="#e4e4e7" />
+              <XAxis dataKey="date" tick={{ fontSize: 11, fill: "#6b7280" }} minTickGap={30} />
               <YAxis
                 domain={["auto", "auto"]}
-                tick={{ fontSize: 11 }}
+                tick={{ fontSize: 11, fill: "#6b7280" }}
                 tickFormatter={(v) => v.toFixed(0)}
                 width={55}
               />
               <Tooltip
-                contentStyle={{ background: "#171d2b", border: "1px solid #2a3346", borderRadius: 8 }}
+                contentStyle={{ background: "#ffffff", border: "1px solid #d4d4d8", borderRadius: 8, boxShadow: "0 10px 30px rgba(0,0,0,.14)" }}
                 formatter={(v, n) => [rupees(v), n]}
-                labelStyle={{ color: "#8b97ad" }}
+                labelStyle={{ color: "#6b7280" }}
               />
               {/* your entry price — the line that makes this chart personal */}
               {avgPrice != null && (
                 <ReferenceLine
                   y={avgPrice}
-                  stroke="#3b82f6"
+                  stroke="#111111"
                   strokeDasharray="4 4"
-                  label={{ value: "your avg", position: "insideTopLeft", fill: "#3b82f6", fontSize: 11 }}
+                  label={{ value: "your avg", position: "insideTopLeft", fill: "#111111", fontSize: 11 }}
                 />
               )}
               <Area

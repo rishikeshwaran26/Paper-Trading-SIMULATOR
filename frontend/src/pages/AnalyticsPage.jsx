@@ -151,16 +151,16 @@ export default function AnalyticsPage() {
         </p>
         <ResponsiveContainer width="100%" height={220}>
           <BarChart data={confChart} margin={{ top: 8, right: 16, bottom: 8, left: 0 }}>
-            <XAxis dataKey="name" tick={{ fontSize: 12 }} />
-            <YAxis tick={{ fontSize: 12 }} />
+            <XAxis dataKey="name" tick={{ fontSize: 12, fill: "#6b7280" }} />
+            <YAxis tick={{ fontSize: 12, fill: "#6b7280" }} />
             <Tooltip
               formatter={(v) => [rupees(v), "avg P&L"]}
-              contentStyle={{ background: "#171d2b", border: "1px solid #2a3346", borderRadius: 8 }}
+              contentStyle={{ background: "#ffffff", border: "1px solid #d4d4d8", borderRadius: 8, boxShadow: "0 10px 30px rgba(0,0,0,.14)" }}
             />
-            <ReferenceLine y={0} stroke="#888" />
+            <ReferenceLine y={0} stroke="#9ca3af" />
             <Bar dataKey="avg_pnl" radius={[4, 4, 0, 0]}>
               {confChart.map((d, i) => (
-                <Cell key={i} fill={d.avg_pnl >= 0 ? "#16a34a" : "#dc2626"} />
+                <Cell key={i} fill={d.avg_pnl >= 0 ? "#157f3c" : "#c1121f"} />
               ))}
             </Bar>
           </BarChart>
