@@ -697,6 +697,12 @@ def start_band_study():
     source = opt_str(body, "source", "bhavcopy")
     if source not in ("bhavcopy", "yahoo"):
         raise ApiError(400, "BadRequest", "'source' must be 'bhavcopy' or 'yahoo'")
+    follow_days = int(body.get("follow_days", backtest.DEFAULT_FOLLOW_DAYS))
+    if not (1 <= follow_days <= backtest.MAX_FOLLOW_DAYS):
+        raise ApiError(
+            400, "BadRequest",
+            f"'follow_days' must be between 1 and {backtest.MAX_FOLLOW_DAYS}",
+        )
 
     service = current_app.config["BAND_STUDY_SERVICE"]
     data = current_app.config.get("BACKTEST_DATA")  # Yahoo: sole source for "yahoo", cross-check for "bhavcopy"
@@ -719,6 +725,7 @@ def start_band_study():
         direction=direction,
         source=source,
         bhav_data=bhav_data,
+        follow_days=follow_days,
     )
     if not started:
         raise ApiError(409, "RunInProgress", "a band study is already running — check its status")

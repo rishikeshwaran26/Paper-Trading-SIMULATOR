@@ -293,6 +293,10 @@ CREATE TABLE IF NOT EXISTS band_study_runs (
     -- which data provider this run used: "yahoo" (per-symbol, rate-limit
     -- prone) or "bhavcopy" (NSE's own daily file, one request per day).
     source         TEXT NOT NULL DEFAULT 'yahoo',
+    -- how many TRADING days after each touch this run tracked.
+    follow_days    INTEGER NOT NULL DEFAULT 1,
+    -- JSON: the cohort's up/down breakdown at each day-offset (1..follow_days).
+    per_day        TEXT NOT NULL DEFAULT '[]',
     error          TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_band_study_runs_dates ON band_study_runs(start_date, end_date);
@@ -321,7 +325,11 @@ CREATE TABLE IF NOT EXISTS band_touches (
     -- only meaningful on the bhavcopy path (raw, unadjusted prices): True if
     -- Yahoo's adjusted % change disagrees sharply, suggesting a split/bonus
     -- rather than a real market move. See cross_check_corporate_actions().
-    corporate_action_suspected INTEGER NOT NULL DEFAULT 0
+    corporate_action_suspected INTEGER NOT NULL DEFAULT 0,
+    -- JSON list of every tracked trading day after the touch. The day2_*
+    -- columns above are this list's first entry, kept for older rows and any
+    -- caller still reading them.
+    follow_days         TEXT    NOT NULL DEFAULT '[]'
 );
 CREATE INDEX IF NOT EXISTS idx_band_touches_run ON band_touches(run_id);
 """
@@ -354,11 +362,27 @@ _MISSING_SYMBOLS_COLUMNS = [
 
 # `source`: which data provider a band study used ("yahoo" | "bhavcopy") — old
 # rows predate the bhavcopy path entirely, so they default to "yahoo".
-_BAND_STUDY_SOURCE_COLUMN = [("source", "TEXT NOT NULL DEFAULT 'yahoo'")]
+# `follow_days`: how many trading days after each touch the run tracked. Runs
+# made before this was configurable tracked exactly one (day 2), so 1 is the
+# honest default for them — not the current default of 5.
+_BAND_STUDY_RUN_ADDED_COLUMNS = [
+    ("source", "TEXT NOT NULL DEFAULT 'yahoo'"),
+    ("follow_days", "INTEGER NOT NULL DEFAULT 1"),
+    # per_day: JSON list of the cohort's up/down breakdown at each day-offset,
+    # computed once when the run finishes (same place every other summary
+    # number is written) rather than recomputed on every read.
+    ("per_day", "TEXT NOT NULL DEFAULT '[]'"),
+]
 
 # corporate_action_suspected: only meaningful on the bhavcopy path (raw,
 # unadjusted prices) — see cross_check_corporate_actions() in engine/backtest.py.
-_BAND_TOUCH_CORP_ACTION_COLUMN = [("corporate_action_suspected", "INTEGER NOT NULL DEFAULT 0")]
+# follow_days: JSON list of every tracked day after the touch; day-2 columns
+# are kept alongside it as the first entry, so older rows and any code reading
+# them keep working.
+_BAND_TOUCH_ADDED_COLUMNS = [
+    ("corporate_action_suspected", "INTEGER NOT NULL DEFAULT 0"),
+    ("follow_days", "TEXT NOT NULL DEFAULT '[]'"),
+]
 
 
 def connect(db_path: str) -> sqlite3.Connection:
@@ -414,8 +438,8 @@ def init_db(db_path: str) -> None:
         _migrate_added_columns(conn, "backtest_movers", _BACKTEST_MOVER_ADDED_COLUMNS)
         _migrate_added_columns(conn, "backtest_runs", _MISSING_SYMBOLS_COLUMNS)
         _migrate_added_columns(conn, "band_study_runs", _MISSING_SYMBOLS_COLUMNS)
-        _migrate_added_columns(conn, "band_study_runs", _BAND_STUDY_SOURCE_COLUMN)
-        _migrate_added_columns(conn, "band_touches", _BAND_TOUCH_CORP_ACTION_COLUMN)
+        _migrate_added_columns(conn, "band_study_runs", _BAND_STUDY_RUN_ADDED_COLUMNS)
+        _migrate_added_columns(conn, "band_touches", _BAND_TOUCH_ADDED_COLUMNS)
 
 
 def _migrate_added_columns(conn: sqlite3.Connection, table: str, added: list[tuple[str, str]]) -> None:

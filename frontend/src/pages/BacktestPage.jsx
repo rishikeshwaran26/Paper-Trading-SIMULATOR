@@ -63,13 +63,17 @@ function BandStudy() {
   const [bandLow, setBandLow] = useState(19);
   const [bandHigh, setBandHigh] = useState(20);
   const [source, setSource] = useState("bhavcopy");
+  const [followDays, setFollowDays] = useState(5);
+  // Which day-offset the results table is showing. Set after a run loads, and
+  // switchable without re-scanning — every tracked day is already in the data.
+  const [viewDay, setViewDay] = useState(1);
 
   const [run, setRun] = useState(null);
   const [runs, setRuns] = useState([]);
   const [status, setStatus] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
-  const [sort, setSort] = useState({ key: "day2_pct_change", dir: "asc" }); // asc: biggest falls first
+  const [sort, setSort] = useState({ key: "_pct", dir: "asc" }); // asc: biggest falls first
   const pollRef = useRef(null);
 
   async function loadHistory() {
@@ -85,7 +89,9 @@ function BandStudy() {
   async function loadRun(id) {
     setLoading(true);
     try {
-      setRun(await api.getBandStudyRun(id));
+      const d = await api.getBandStudyRun(id);
+      setRun(d);
+      setViewDay(1); // a freshly loaded run always starts on day 1
     } catch (e) {
       setError(e);
     } finally {
@@ -132,6 +138,7 @@ function BandStudy() {
         band_low: Number(bandLow),
         band_high: Number(bandHigh),
         source,
+        follow_days: Number(followDays),
       });
       setStatus(r.status);
       startPolling();
@@ -143,17 +150,31 @@ function BandStudy() {
   const running = status?.status === "running";
 
   const touches = run?.touches ?? [];
+  const runFollowDays = run?.run?.follow_days ?? 1;
+
+  // Attach the currently-viewed day's numbers to each touch, so sorting and
+  // rendering both work off one shape regardless of which day is selected.
+  // viewDay === 0 means "all days" — no single day is flattened in.
+  const rows = useMemo(() => {
+    return touches.map((t) => {
+      const days = t.follow_days ?? [];
+      const d = viewDay > 0 ? days.find((x) => x.offset === viewDay) : null;
+      return { ...t, _day: d ?? null, _pct: d ? d.pct_from_touch : null };
+    });
+  }, [touches, viewDay]);
+
   const sortedTouches = useMemo(() => {
     const { key, dir } = sort;
     const mul = dir === "asc" ? 1 : -1;
-    return [...touches].sort((a, b) => {
-      const av = a[key], bv = b[key];
+    return [...rows].sort((a, b) => {
+      const av = key === "_pct" ? a._pct : a[key];
+      const bv = key === "_pct" ? b._pct : b[key];
       if (av == null && bv == null) return 0;
-      if (av == null) return 1;  // no-day2 rows sink to the bottom regardless of direction
+      if (av == null) return 1;  // rows with no data this far out sink to the bottom
       if (bv == null) return -1;
       return (av - bv) * mul;
     });
-  }, [touches, sort]);
+  }, [rows, sort]);
 
   function toggleSort(key) {
     setSort((s) => (s.key === key ? { key, dir: s.dir === "asc" ? "desc" : "asc" } : { key, dir: "asc" }));
@@ -183,6 +204,10 @@ function BandStudy() {
           <label>Band high (%)
             <input type="number" min="1" max="100" value={bandHigh} onChange={(e) => setBandHigh(e.target.value)} />
           </label>
+          <label>Follow-up days
+            <input type="number" min="1" max="30" value={followDays}
+              onChange={(e) => setFollowDays(e.target.value)} />
+          </label>
           <label>Data source
             <select value={source} onChange={(e) => setSource(e.target.value)}>
               <option value="bhavcopy">NSE bhavcopy (fast, whole exchange)</option>
@@ -190,6 +215,11 @@ function BandStudy() {
             </select>
           </label>
         </div>
+        <p className="muted" style={{ fontSize: 12, margin: "0 0 8px" }}>
+          Follow-up days are <strong>trading</strong> days after each touch, so weekends and holidays never
+          consume one — and the window runs past the end date when it needs to (a touch on 31 Jan is still
+          followed into February). After the scan you can view any single day, or all of them.
+        </p>
         {source === "bhavcopy" && (
           <p className="muted" style={{ fontSize: 12, margin: "0 0 8px" }}>
             One request per trading day, straight from NSE's own daily file — immune to Yahoo's per-symbol
@@ -254,14 +284,27 @@ function BandStudy() {
       )}
 
       {run && run.run.status === "done" && touches.length > 0 && (
-        <BandStudyResult run={run.run} touches={sortedTouches} onSort={toggleSort} sortArrow={arrow} />
+        <BandStudyResult
+          run={run.run}
+          touches={sortedTouches}
+          onSort={toggleSort}
+          sortArrow={arrow}
+          viewDay={viewDay}
+          onViewDay={setViewDay}
+          followDays={runFollowDays}
+        />
       )}
     </>
   );
 }
 
-function BandStudyResult({ run, touches, onSort, sortArrow }) {
+function BandStudyResult({ run, touches, onSort, sortArrow, viewDay, onViewDay, followDays }) {
   const flaggedCount = touches.filter((t) => t.corporate_action_suspected).length;
+  const perDay = run.per_day ?? [];
+  const dayOffsets = Array.from({ length: followDays }, (_, i) => i + 1);
+  const selected = perDay.find((d) => d.offset === viewDay) ?? null;
+  const showingAll = viewDay === 0;
+
   return (
     <>
       {run.missing_count > 0 && (
@@ -283,39 +326,81 @@ function BandStudyResult({ run, touches, onSort, sortArrow }) {
         </div>
       )}
 
-      {/* Step 1: total count, up front */}
-      <div className="summary-row">
-        <Stat label="Total touches" value={run.total_touches} />
-        <Stat label="With a day 2" value={run.with_day2} />
-        <Stat label="Up on day 2" value={`${run.up_pct ?? 0}%`} cls="pos" />
-        <Stat label="Down on day 2" value={`${run.down_pct ?? 0}%`} cls="neg" />
+      {/* Day switcher — every tracked day is already in the data, so this
+          changes the view instantly without re-scanning. */}
+      <div className="card" style={{ padding: "12px 16px" }}>
+        <div className="card-title" style={{ marginBottom: 8 }}>
+          Showing {showingAll ? `all ${followDays} days` : `day ${viewDay} after the touch`}
+        </div>
+        <div className="seg" style={{ marginBottom: 0 }}>
+          {dayOffsets.map((n) => (
+            <button key={n} type="button" className={viewDay === n ? "on" : ""} onClick={() => onViewDay(n)}>
+              Day {n}
+            </button>
+          ))}
+          <button type="button" className={showingAll ? "on" : ""} onClick={() => onViewDay(0)}>
+            All {followDays}
+          </button>
+        </div>
       </div>
 
-      {/* Step 4: the report — up and down kept separate, never blended into one average */}
+      {/* Headline counts, for whichever day is selected */}
+      <div className="summary-row">
+        <Stat label="Total touches" value={run.total_touches} />
+        <Stat
+          label={showingAll ? "Scored on day 1" : `Scored on day ${viewDay}`}
+          value={showingAll ? (perDay[0]?.scored ?? 0) : (selected?.scored ?? 0)}
+        />
+        <Stat
+          label={showingAll ? "Up by day 1" : `Up by day ${viewDay}`}
+          value={`${(showingAll ? perDay[0]?.up_pct : selected?.up_pct) ?? 0}%`}
+          cls="pos"
+        />
+        <Stat
+          label={showingAll ? "Down by day 1" : `Down by day ${viewDay}`}
+          value={`${(showingAll ? perDay[0]?.down_pct : selected?.down_pct) ?? 0}%`}
+          cls="neg"
+        />
+      </div>
+
+      {/* The report: every tracked day, up and down kept separate. Cumulative
+          from the touch close, so day 3 answers "where is it now, 3 days on?" */}
       <div className="card">
-        <div className="card-title">Day-2 outcome, up vs down (kept separate on purpose)</div>
+        <div className="card-title">
+          Cumulative move by each day after the touch (up vs down kept separate)
+        </div>
         <table className="table">
           <thead>
-            <tr><th></th><th className="num">Count</th><th className="num">% of touches</th><th className="num">Avg day-2 move</th></tr>
+            <tr>
+              <th>Day</th>
+              <th className="num">Scored</th>
+              <th className="num">Up</th>
+              <th className="num">Avg up move</th>
+              <th className="num">Down</th>
+              <th className="num">Avg down move</th>
+            </tr>
           </thead>
           <tbody>
-            <tr>
-              <td><span className="tag buy">MOVED UP</span></td>
-              <td className="num">{run.up_count}</td>
-              <td className="num">{run.up_pct ?? 0}%</td>
-              <td className="num pos">{run.avg_day2_pct_up != null ? pct(run.avg_day2_pct_up) : "—"}</td>
-            </tr>
-            <tr>
-              <td><span className="tag sell">MOVED DOWN</span></td>
-              <td className="num">{run.down_count}</td>
-              <td className="num">{run.down_pct ?? 0}%</td>
-              <td className="num neg">{run.avg_day2_pct_down != null ? pct(run.avg_day2_pct_down) : "—"}</td>
-            </tr>
+            {perDay.map((d) => (
+              <tr
+                key={d.offset}
+                className="clickable"
+                onClick={() => onViewDay(d.offset)}
+                style={!showingAll && d.offset === viewDay ? { background: "var(--accent-soft)" } : undefined}
+              >
+                <td><strong>Day {d.offset}</strong></td>
+                <td className="num">{d.scored}</td>
+                <td className="num">{d.up_count} <span className="muted">({d.up_pct}%)</span></td>
+                <td className="num pos">{d.avg_pct_up != null ? pct(d.avg_pct_up) : "—"}</td>
+                <td className="num">{d.down_count} <span className="muted">({d.down_pct}%)</span></td>
+                <td className="num neg">{d.avg_pct_down != null ? pct(d.avg_pct_down) : "—"}</td>
+              </tr>
+            ))}
           </tbody>
         </table>
       </div>
 
-      {/* Steps 2 & 3: every touch, shown separately, sortable by day-2 change */}
+      {/* Every touch, shown separately */}
       <section className="card">
         <div className="card-title">
           {run.start_date} → {run.end_date} — every {run.direction === "up" ? "spike" : "drop"} that touched {run.band_low}–{run.band_high}%
@@ -327,45 +412,74 @@ function BandStudyResult({ run, touches, onSort, sortArrow }) {
               <th className="num">Touch date</th>
               <th className="num">Touch %</th>
               <th className="num">Close %</th>
-              <th className="num sortable" onClick={() => onSort("day2_pct_change")}>
-                Day-2 change{sortArrow("day2_pct_change")}
-              </th>
-              <th className="num">Day-2 open→close</th>
-              <th></th>
+              {showingAll ? (
+                dayOffsets.map((n) => <th key={n} className="num">D{n}</th>)
+              ) : (
+                <>
+                  <th className="num">Date</th>
+                  <th className="num sortable" onClick={() => onSort("_pct")}>
+                    Day-{viewDay} change{sortArrow("_pct")}
+                  </th>
+                  <th className="num">Open→close</th>
+                  <th></th>
+                </>
+              )}
             </tr>
           </thead>
           <tbody>
-            {touches.map((t) => (
-              <tr key={`${t.symbol}-${t.date}`} style={t.corporate_action_suspected ? { opacity: 0.55 } : undefined}>
-                <td>
-                  <strong>{t.symbol}</strong>
-                  {t.corporate_action_suspected && (
-                    <span className="tag warn" title="Bhavcopy vs Yahoo-adjusted price disagree sharply — likely a split/bonus, not a real move">
-                      ⚠ possible split/bonus
-                    </span>
-                  )}
-                  <div className="muted" style={{ fontSize: 12 }}>{t.name}</div>
-                </td>
-                <td className="num">{t.date}</td>
-                <td className={`num ${t.direction === "up" ? "pos" : "neg"}`}>{pct(t.touch_pct)}</td>
-                <td className="num">{pct(t.close_pct)}</td>
-                <td className={`num ${t.day2_pct_change != null ? (t.day2_pct_change >= 0 ? "pos" : "neg") : ""}`}>
-                  {t.day2_pct_change != null ? pct(t.day2_pct_change) : "—"}
-                </td>
-                <td className={`num ${t.day2_open_close_pct != null ? (t.day2_open_close_pct >= 0 ? "pos" : "neg") : ""}`}>
-                  {t.day2_open_close_pct != null ? pct(t.day2_open_close_pct) : "—"}
-                </td>
-                <td>
-                  {t.day2_pct_change == null ? (
-                    <span className="chip muted">no day 2 yet</span>
+            {touches.map((t) => {
+              const byOffset = new Map((t.follow_days ?? []).map((d) => [d.offset, d]));
+              return (
+                <tr key={`${t.symbol}-${t.date}`} style={t.corporate_action_suspected ? { opacity: 0.55 } : undefined}>
+                  <td>
+                    <strong>{t.symbol}</strong>
+                    {t.corporate_action_suspected && (
+                      <span className="tag warn" title="Bhavcopy vs Yahoo-adjusted price disagree sharply — likely a split/bonus, not a real move">
+                        ⚠ possible split/bonus
+                      </span>
+                    )}
+                    <div className="muted" style={{ fontSize: 12 }}>{t.name}</div>
+                  </td>
+                  <td className="num">{t.date}</td>
+                  <td className={`num ${t.direction === "up" ? "pos" : "neg"}`}>{pct(t.touch_pct)}</td>
+                  <td className="num">{pct(t.close_pct)}</td>
+
+                  {showingAll ? (
+                    dayOffsets.map((n) => {
+                      const d = byOffset.get(n);
+                      return (
+                        <td
+                          key={n}
+                          className={`num ${d ? (d.pct_from_touch >= 0 ? "pos" : "neg") : ""}`}
+                          title={d ? `${d.date} · close ${d.close}` : "no data this far out"}
+                        >
+                          {d ? pct(d.pct_from_touch) : "—"}
+                        </td>
+                      );
+                    })
                   ) : (
-                    <span className={`tag ${t.day2_pct_change < 0 ? "sell" : "buy"}`}>
-                      {t.day2_pct_change < 0 ? "fell" : "rose"}
-                    </span>
+                    <>
+                      <td className="num muted">{t._day?.date ?? "—"}</td>
+                      <td className={`num ${t._pct != null ? (t._pct >= 0 ? "pos" : "neg") : ""}`}>
+                        {t._pct != null ? pct(t._pct) : "—"}
+                      </td>
+                      <td className={`num ${t._day?.open_close_pct != null ? (t._day.open_close_pct >= 0 ? "pos" : "neg") : ""}`}>
+                        {t._day?.open_close_pct != null ? pct(t._day.open_close_pct) : "—"}
+                      </td>
+                      <td>
+                        {t._pct == null ? (
+                          <span className="chip muted">no data</span>
+                        ) : (
+                          <span className={`tag ${t._pct < 0 ? "sell" : "buy"}`}>
+                            {t._pct < 0 ? "fell" : "rose"}
+                          </span>
+                        )}
+                      </td>
+                    </>
                   )}
-                </td>
-              </tr>
-            ))}
+                </tr>
+              );
+            })}
           </tbody>
         </table>
       </section>
