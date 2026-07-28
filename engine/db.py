@@ -297,6 +297,10 @@ CREATE TABLE IF NOT EXISTS band_study_runs (
     follow_days    INTEGER NOT NULL DEFAULT 1,
     -- JSON: the cohort's up/down breakdown at each day-offset (1..follow_days).
     per_day        TEXT NOT NULL DEFAULT '[]',
+    -- how many TRADING days BEFORE each touch this run also tracked (0 = none).
+    before_days    INTEGER NOT NULL DEFAULT 0,
+    -- JSON: same breakdown as per_day, for offsets -before_days..-1.
+    per_before_day TEXT NOT NULL DEFAULT '[]',
     error          TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_band_study_runs_dates ON band_study_runs(start_date, end_date);
@@ -329,7 +333,10 @@ CREATE TABLE IF NOT EXISTS band_touches (
     -- JSON list of every tracked trading day after the touch. The day2_*
     -- columns above are this list's first entry, kept for older rows and any
     -- caller still reading them.
-    follow_days         TEXT    NOT NULL DEFAULT '[]'
+    follow_days         TEXT    NOT NULL DEFAULT '[]',
+    -- JSON list of every tracked trading day BEFORE the touch, empty unless
+    -- the run asked for before_days > 0.
+    before_days          TEXT    NOT NULL DEFAULT '[]'
 );
 CREATE INDEX IF NOT EXISTS idx_band_touches_run ON band_touches(run_id);
 """
@@ -372,6 +379,10 @@ _BAND_STUDY_RUN_ADDED_COLUMNS = [
     # computed once when the run finishes (same place every other summary
     # number is written) rather than recomputed on every read.
     ("per_day", "TEXT NOT NULL DEFAULT '[]'"),
+    # before_days/per_before_day: same idea, for the days BEFORE the touch.
+    # Runs made before this was configurable tracked none, so 0 is honest.
+    ("before_days", "INTEGER NOT NULL DEFAULT 0"),
+    ("per_before_day", "TEXT NOT NULL DEFAULT '[]'"),
 ]
 
 # corporate_action_suspected: only meaningful on the bhavcopy path (raw,
@@ -382,6 +393,7 @@ _BAND_STUDY_RUN_ADDED_COLUMNS = [
 _BAND_TOUCH_ADDED_COLUMNS = [
     ("corporate_action_suspected", "INTEGER NOT NULL DEFAULT 0"),
     ("follow_days", "TEXT NOT NULL DEFAULT '[]'"),
+    ("before_days", "TEXT NOT NULL DEFAULT '[]'"),
 ]
 
 

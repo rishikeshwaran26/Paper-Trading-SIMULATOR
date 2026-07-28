@@ -914,15 +914,16 @@ class BandStudyRepository:
 
     def create_run(
         self, start_date: str, end_date: str, band_low: float, band_high: float,
-        direction: str, source: str = "yahoo", follow_days: int = 1,
+        direction: str, source: str = "yahoo", follow_days: int = 1, before_days: int = 0,
     ) -> int:
         with transaction(self.db_path) as conn:
             cur = conn.execute(
                 """INSERT INTO band_study_runs
                    (start_date, end_date, band_low, band_high, direction, source,
-                    follow_days, started_at, status)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'running')""",
-                (start_date, end_date, band_low, band_high, direction, source, follow_days, _now()),
+                    follow_days, before_days, started_at, status)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'running')""",
+                (start_date, end_date, band_low, band_high, direction, source,
+                 follow_days, before_days, _now()),
             )
             return cur.lastrowid
 
@@ -936,8 +937,8 @@ class BandStudyRepository:
                    (run_id, symbol, name, date, direction, prev_close, high, low, touch_pct,
                     close, close_pct, volume, day2_date, day2_open, day2_high, day2_low,
                     day2_close, day2_pct_change, day2_open_close_pct, corporate_action_suspected,
-                    follow_days)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    follow_days, before_days)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 [
                     (
                         run_id, t.symbol, t.name, t.date, t.direction, t.prev_close, t.high, t.low,
@@ -945,6 +946,7 @@ class BandStudyRepository:
                         t.day2_high, t.day2_low, t.day2_close, t.day2_pct_change, t.day2_open_close_pct,
                         1 if t.corporate_action_suspected else 0,
                         json.dumps([f.to_dict() for f in t.follow_days]),
+                        json.dumps([f.to_dict() for f in t.before_days]),
                     )
                     for t in result.touches
                 ],
@@ -954,14 +956,15 @@ class BandStudyRepository:
                    SET status='done', finished_at=?, universe_count=?, total_touches=?,
                        with_day2=?, up_count=?, down_count=?, up_pct=?, down_pct=?,
                        avg_day2_pct_up=?, avg_day2_pct_down=?, missing_count=?, missing_symbols=?,
-                       per_day=?
+                       per_day=?, per_before_day=?
                    WHERE id=?""",
                 (
                     _now(), result.universe_count, summary.total_touches, summary.with_day2,
                     summary.up_count, summary.down_count, summary.up_pct, summary.down_pct,
                     summary.avg_day2_pct_up, summary.avg_day2_pct_down,
                     len(result.missing_symbols), json.dumps(result.missing_symbols),
-                    json.dumps([d.to_dict() for d in summary.per_day]), run_id,
+                    json.dumps([d.to_dict() for d in summary.per_day]),
+                    json.dumps([d.to_dict() for d in summary.per_before_day]), run_id,
                 ),
             )
 
@@ -984,6 +987,7 @@ class BandStudyRepository:
             dict(t) | {
                 "corporate_action_suspected": bool(t["corporate_action_suspected"]),
                 "follow_days": json.loads(t["follow_days"] or "[]"),
+                "before_days": json.loads(t["before_days"] or "[]"),
             }
             for t in touches
         ]
@@ -1008,6 +1012,8 @@ class BandStudyRepository:
             "source": run["source"],
             "follow_days": run["follow_days"],
             "per_day": json.loads(run["per_day"] or "[]"),
+            "before_days": run["before_days"],
+            "per_before_day": json.loads(run["per_before_day"] or "[]"),
             "status": run["status"],
             "started_at": run["started_at"],
             "finished_at": run["finished_at"],

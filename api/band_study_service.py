@@ -74,6 +74,7 @@ class BandStudyService:
         source: str = "bhavcopy",
         bhav_data=None,
         follow_days: int = backtest.DEFAULT_FOLLOW_DAYS,
+        before_days: int = backtest.DEFAULT_BEFORE_DAYS,
     ) -> bool:
         """Kick off a band-touch study in the background. Returns False if one
         is already running. `data` is the Yahoo provider — used as the sole
@@ -96,7 +97,7 @@ class BandStudyService:
         self._thread = threading.Thread(
             target=self._run,
             args=(db_path, cache_path, bhav_data, data, start_date, end_date,
-                  band_low, band_high, direction, min_volume, chunk_size, source, follow_days),
+                  band_low, band_high, direction, min_volume, chunk_size, source, follow_days, before_days),
             name="band-study-run",
             daemon=True,
         )
@@ -104,13 +105,13 @@ class BandStudyService:
         return True
 
     def _run(self, db_path, cache_path, bhav_data, data, start_date, end_date,
-              band_low, band_high, direction, min_volume, chunk_size, source, follow_days) -> None:
+              band_low, band_high, direction, min_volume, chunk_size, source, follow_days, before_days) -> None:
         repo = BandStudyRepository(db_path)
         run_id = None
         try:
             run_id = repo.create_run(
                 start_date.isoformat(), end_date.isoformat(), band_low, band_high, direction,
-                source=source, follow_days=follow_days,
+                source=source, follow_days=follow_days, before_days=before_days,
             )
             self._set(run_id=run_id)
 
@@ -124,7 +125,7 @@ class BandStudyService:
                 result = backtest.scan_band_touches_bhavcopy(
                     rows, bhav_data, data, start_date, end_date, band_low=band_low, band_high=band_high,
                     direction=direction, min_volume=min_volume, progress=progress,
-                    follow_days=follow_days,
+                    follow_days=follow_days, before_days=before_days,
                 )
             else:
                 rows, _uni_source = universe.load_universe(cache_path)
@@ -132,7 +133,7 @@ class BandStudyService:
                 result = backtest.scan_band_touches(
                     rows, data, start_date, end_date, band_low=band_low, band_high=band_high,
                     direction=direction, min_volume=min_volume, chunk_size=chunk_size, progress=progress,
-                    follow_days=follow_days,
+                    follow_days=follow_days, before_days=before_days,
                 )
 
             repo.finish_run(run_id, result)

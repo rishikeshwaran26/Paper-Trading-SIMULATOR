@@ -381,6 +381,12 @@ DEFAULT_BAND_HIGH = 20.0
 DEFAULT_FOLLOW_DAYS = 5
 MAX_FOLLOW_DAYS = 30
 
+# How many TRADING days BEFORE a touch to also track — lets a graph show the
+# ramp-in to the spike, not just the reversion after it. 0 (the default) means
+# "don't bother" — most studies only care about what happens next.
+DEFAULT_BEFORE_DAYS = 0
+MAX_BEFORE_DAYS = 30
+
 
 @dataclass
 class FollowDay:
@@ -431,6 +437,11 @@ class BandTouch:
     # runs out (a touch near the very end of available history).
     follow_days: list[FollowDay] = field(default_factory=list)
 
+    # Every tracked trading day BEFORE the touch, nearest-to-touch first
+    # (offset -1, -2, ... going further back) — the ramp-in to the spike.
+    # Empty unless the run asked for before_days > 0.
+    before_days: list[FollowDay] = field(default_factory=list)
+
     # Only meaningful for the bhavcopy path (raw, unadjusted prices): True if
     # Yahoo's split/bonus-ADJUSTED % change for this date disagrees sharply
     # with bhavcopy's raw touch_pct — the tell-tale sign the "spike" was a
@@ -443,7 +454,8 @@ class BandTouch:
     # the day-2 columns, the existing summary maths and the API shape all keep
     # working unchanged now that the study tracks N days instead of exactly one.
     def _day(self, offset: int) -> Optional[FollowDay]:
-        for f in self.follow_days:
+        days = self.follow_days if offset >= 0 else self.before_days
+        for f in days:
             if f.offset == offset:
                 return f
         return None
@@ -501,6 +513,7 @@ class BandTouch:
             "close_pct": self.close_pct,
             "volume": self.volume,
             "follow_days": [f.to_dict() for f in self.follow_days],
+            "before_days": [f.to_dict() for f in self.before_days],
             "day2_date": self.day2_date,
             "day2_open": self.day2_open,
             "day2_high": self.day2_high,
@@ -567,6 +580,10 @@ class BandStudySummary:
     avg_day2_pct_up: Optional[float]
     avg_day2_pct_down: Optional[float]
     per_day: list[DaySummary] = field(default_factory=list)
+    # Same breakdown for the days BEFORE the touch, ordered furthest-back
+    # first (chronological) so it reads left-to-right into the touch itself.
+    # Empty unless the run tracked before_days > 0.
+    per_before_day: list[DaySummary] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return {
@@ -580,6 +597,7 @@ class BandStudySummary:
             "avg_day2_pct_up": self.avg_day2_pct_up,
             "avg_day2_pct_down": self.avg_day2_pct_down,
             "per_day": [d.to_dict() for d in self.per_day],
+            "per_before_day": [d.to_dict() for d in self.per_before_day],
         }
 
 
@@ -594,9 +612,10 @@ class BandStudyResult:
     touches: list[BandTouch] = field(default_factory=list)
     missing_symbols: list[str] = field(default_factory=list)  # couldn't be fetched even after retry
     follow_days: int = DEFAULT_FOLLOW_DAYS
+    before_days: int = DEFAULT_BEFORE_DAYS
 
     def summary(self) -> BandStudySummary:
-        return _summarize_band_touches(self.touches, self.follow_days)
+        return _summarize_band_touches(self.touches, self.follow_days, self.before_days)
 
 
 def _summarize_one_day(touches: list[BandTouch], offset: int) -> DaySummary:
@@ -627,10 +646,12 @@ def _summarize_one_day(touches: list[BandTouch], offset: int) -> DaySummary:
 
 
 def _summarize_band_touches(
-    touches: list[BandTouch], follow_days: int = DEFAULT_FOLLOW_DAYS
+    touches: list[BandTouch], follow_days: int = DEFAULT_FOLLOW_DAYS, before_days: int = DEFAULT_BEFORE_DAYS
 ) -> BandStudySummary:
     n = len(touches)
     per_day = [_summarize_one_day(touches, offset) for offset in range(1, follow_days + 1)]
+    # Furthest-back first, so it reads chronologically into the touch.
+    per_before_day = [_summarize_one_day(touches, -offset) for offset in range(before_days, 0, -1)]
     day2 = per_day[0] if per_day else _summarize_one_day(touches, 1)
     return BandStudySummary(
         total_touches=n,
@@ -643,6 +664,7 @@ def _summarize_band_touches(
         avg_day2_pct_up=day2.avg_pct_up,
         avg_day2_pct_down=day2.avg_pct_down,
         per_day=per_day,
+        per_before_day=per_before_day,
     )
 
 
@@ -685,6 +707,41 @@ def _build_follow_days(touch_close: float, next_bars: list[dict], limit: int) ->
     return out
 
 
+def _build_before_days(touch_close: float, prev_bars: list[dict], limit: int) -> list[FollowDay]:
+    """Turn the bars BEFORE a touch into FollowDay records, nearest-to-touch
+    first (offset -1, -2, ... -limit) — mirrors _build_follow_days but walking
+    backward, so a graph can show the ramp-in to the spike as well as the
+    reversion after it.
+
+    `prev_bars` must already be ordered nearest-to-touch first (prev_bars[0]
+    is the trading day immediately before the touch). Every `pct_from_touch`
+    is still measured against the TOUCH day's close, so offset -1 and +1 read
+    on the same scale either side of 0.
+    """
+    out: list[FollowDay] = []
+    prev_close = touch_close
+    for i, bar in enumerate(prev_bars[:limit], start=1):
+        close = bar.get("close")
+        if close is None:
+            break  # a gap mid-window would make every earlier offset misleading
+        open_ = bar.get("open")
+        out.append(
+            FollowDay(
+                offset=-i,
+                date=bar["date"],
+                open=round(open_, 2) if open_ is not None else None,
+                high=round(bar["high"], 2) if bar.get("high") is not None else None,
+                low=round(bar["low"], 2) if bar.get("low") is not None else None,
+                close=round(close, 2),
+                pct_from_touch=round((close - touch_close) / touch_close * 100, 2),
+                pct_from_prev_day=round((close - prev_close) / prev_close * 100, 2),
+                open_close_pct=round((close - open_) / open_ * 100, 2) if open_ else None,
+            )
+        )
+        prev_close = close
+    return out
+
+
 def scan_band_touches(
     rows: list[dict],
     data: BacktestData,
@@ -697,12 +754,16 @@ def scan_band_touches(
     chunk_size: int = 100,
     progress: Optional[Callable[[int, int, str], None]] = None,
     follow_days: int = DEFAULT_FOLLOW_DAYS,
+    before_days: int = DEFAULT_BEFORE_DAYS,
 ) -> BandStudyResult:
     """For every trading day in [start_date, end_date], find every stock whose
     intraday move touched [band_low, band_high]%, then track the next
-    `follow_days` TRADING days. `rows` is [{symbol, name}] — the universe.
+    `follow_days` TRADING days (and, if requested, the `before_days` TRADING
+    days leading up to it). `rows` is [{symbol, name}] — the universe.
     """
-    lookback_start = start_date - timedelta(days=10)  # just enough for a prev_close before start_date
+    # 10 days is "just enough for a prev_close before start_date"; before_days
+    # needs its own buffer on top of that when a graph wants the ramp-in too.
+    lookback_start = start_date - timedelta(days=10) - _trading_days_buffer(before_days)
     # The follow window deliberately runs PAST end_date: a touch on the last
     # day of the range still needs its follow-up days, which fall in the next
     # month. Without this, the final touches of every scan would go unscored.
@@ -723,7 +784,7 @@ def scan_band_touches(
             touches.extend(
                 _touches_for_symbol(
                     sym, name_of.get(sym, sym), bars, start_date, end_date,
-                    band_low, band_high, direction, min_volume, follow_days,
+                    band_low, band_high, direction, min_volume, follow_days, before_days,
                 )
             )
         if progress:
@@ -740,6 +801,7 @@ def scan_band_touches(
         touches=touches,
         missing_symbols=missing_symbols,
         follow_days=follow_days,
+        before_days=before_days,
     )
 
 
@@ -754,6 +816,7 @@ def _touches_for_symbol(
     direction: str,
     min_volume: int,
     follow_days: int = DEFAULT_FOLLOW_DAYS,
+    before_days: int = DEFAULT_BEFORE_DAYS,
 ) -> list[BandTouch]:
     out: list[BandTouch] = []
     start_iso, end_iso = start_date.isoformat(), end_date.isoformat()
@@ -792,6 +855,7 @@ def _touches_for_symbol(
             close_pct=close_pct,
             volume=volume,
             follow_days=_build_follow_days(close, bars[i + 1 :], follow_days),
+            before_days=_build_before_days(close, list(reversed(bars[max(0, i - before_days) : i])), before_days),
         )
         out.append(touch)
     return out
@@ -835,13 +899,15 @@ def scan_band_touches_bhavcopy(
     min_volume: int = DEFAULT_MIN_VOLUME,
     progress: Optional[Callable[[int, int, str], None]] = None,
     follow_days: int = DEFAULT_FOLLOW_DAYS,
+    before_days: int = DEFAULT_BEFORE_DAYS,
 ) -> BandStudyResult:
     """Same question as scan_band_touches() — which stocks touched the band and
-    what happened over the next `follow_days` trading days — answered via NSE's
-    own daily bhavcopy instead of per-symbol Yahoo queries. `rows` supplies
-    symbol->name only; the actual day-by-day universe comes from whatever
-    bhavcopy itself lists that day (more authoritative than any separately
-    maintained symbol list).
+    what happened over the next `follow_days` trading days (and, if requested,
+    the `before_days` leading up to it) — answered via NSE's own daily
+    bhavcopy instead of per-symbol Yahoo queries. `rows` supplies symbol->name
+    only; the actual day-by-day universe comes from whatever bhavcopy itself
+    lists that day (more authoritative than any separately maintained symbol
+    list).
     """
     name_of = {r["symbol"]: r.get("name", r["symbol"]) for r in rows}
 
@@ -875,6 +941,21 @@ def scan_band_touches_bhavcopy(
                     break
         return found
 
+    def prev_trading_days(before: date, n: int) -> list[tuple[date, dict[str, dict]]]:
+        """The previous `n` actual TRADING days before `before`, nearest first,
+        skipping weekends and holidays — the mirror image of
+        next_trading_days(), used to build the ramp-in to a touch."""
+        found: list[tuple[date, dict[str, dict]]] = []
+        budget = int(n * 1.6) + 10
+        for offset in range(1, budget + 1):
+            d = before - timedelta(days=offset)
+            rows_for_day = day_rows(d)
+            if rows_for_day:
+                found.append((d, rows_for_day))
+                if len(found) >= n:
+                    break
+        return found
+
     d = start_date
     day_num = 0
     while d <= end_date:
@@ -887,8 +968,9 @@ def scan_band_touches_bhavcopy(
             continue
 
         # Computed lazily and shared by every touch found today — the follow-up
-        # trading days are the same calendar days for all of them.
+        # (and lead-in) trading days are the same calendar days for all of them.
         forward: Optional[list[tuple[date, dict[str, dict]]]] = None
+        backward: Optional[list[tuple[date, dict[str, dict]]]] = None
 
         for sym, row in rows_today.items():
             prev_close = row.get("prev_close")
@@ -920,12 +1002,23 @@ def scan_band_touches_bhavcopy(
                     break
                 next_bars.append({**frow, "date": fd.isoformat()})
 
+            prev_bars: list[dict] = []
+            if before_days > 0:
+                if backward is None:
+                    backward = prev_trading_days(d, before_days)
+                for pd, prows in backward:
+                    prow = prows.get(sym)
+                    if not prow:
+                        break  # same reasoning as forward: stop rather than shift offsets
+                    prev_bars.append({**prow, "date": pd.isoformat()})
+
             touches.append(
                 BandTouch(
                     symbol=sym, name=name_of.get(sym, sym), date=d.isoformat(), direction=direction,
                     prev_close=round(prev_close, 2), high=round(high, 2), low=round(low, 2),
                     touch_pct=touch_pct, close=round(close, 2), close_pct=close_pct, volume=volume,
                     follow_days=_build_follow_days(close, next_bars, follow_days),
+                    before_days=_build_before_days(close, prev_bars, before_days),
                 )
             )
         d += timedelta(days=1)
@@ -937,7 +1030,7 @@ def scan_band_touches_bhavcopy(
         start_date=start_date.isoformat(), end_date=end_date.isoformat(),
         band_low=band_low, band_high=band_high, direction=direction,
         universe_count=len(rows), touches=touches, missing_symbols=[],
-        follow_days=follow_days,
+        follow_days=follow_days, before_days=before_days,
     )
 
 

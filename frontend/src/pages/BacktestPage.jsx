@@ -1,20 +1,22 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api.js";
 import { Loading, ErrorBanner } from "../components/Status.jsx";
-import Sparkline from "../components/Sparkline.jsx";
-import { rupees, pct, when } from "../format.js";
+import { pct } from "../format.js";
 
 // BACKTEST PAGE — does the "20% spike reverts" idea actually hold up?
 //
-// Two modes, both replaying PAST data (Yahoo Finance already has years of
-// daily history, so there's nothing to wait for):
+// Both modes replay PAST data through the same band-touch engine (a tight %
+// band, e.g. 19-20%, checked against the day's INTRADAY HIGH/LOW so a fade
+// back before close still counts) and can track trading days both BEFORE and
+// AFTER each touch:
 //
-//   Single date  — one day, a wide threshold, a multi-week walk-forward
-//                  (peak / first-red / round-trip). The original tool.
-//   Band study   — a tight % band (e.g. 19-20%) over a whole DATE RANGE,
-//                  looking only at what the very NEXT trading day did.
-//                  This is "Phase 1" of the research: prove the idea on a
-//                  small, cheap slice before widening the band or the window.
+//   Single date  — one specific day, one specific spike. Defaults to a wider
+//                  before/after window (5 before, 10 after) since the whole
+//                  point is looking closely at one event.
+//   Band study   — a whole DATE RANGE, so many touches at once. Defaults to
+//                  after-only (before_days=0) since the headline question is
+//                  "what happens next", but the same before/after tracking
+//                  and per-touch graph are available here too.
 //
 // Both run on a background thread with polled progress, since even a
 // historical replay means real batched network calls across the exchange.
@@ -23,6 +25,21 @@ function todayMinusDays(days) {
   const d = new Date();
   d.setDate(d.getDate() - days);
   return d.toISOString().slice(0, 10);
+}
+
+// Resolves any sortable column's value for one touch. `offset:<n>` keys cover
+// the per-day columns shown in the "all days" table view; the rest cover the
+// fixed columns shown in the single-day view.
+function sortValue(t, key, viewDay, findDay) {
+  if (key === "symbol") return t.symbol;
+  if (key === "date") return t.date;
+  if (key === "touch_pct") return t.touch_pct;
+  if (key === "close_pct") return t.close_pct;
+  if (key === "_day_date") return findDay(t, viewDay)?.date ?? null;
+  if (key === "_pct") return findDay(t, viewDay)?.pct_from_touch ?? null;
+  if (key === "_open_close") return findDay(t, viewDay)?.open_close_pct ?? null;
+  if (key.startsWith("offset:")) return findDay(t, Number(key.slice(7)))?.pct_from_touch ?? null;
+  return null;
 }
 
 export default function BacktestPage() {
@@ -45,35 +62,45 @@ export default function BacktestPage() {
         </button>
       </div>
 
-      {mode === "band" ? <BandStudy /> : <SingleDateBacktest />}
+      {/* key={mode} remounts fresh on toggle — the two modes have different
+          defaults (before/after window sizes) and shouldn't share state. */}
+      <BandStudy key={mode} singleDate={mode === "single"} />
     </div>
   );
 }
 
 // =============================================================================
-// BAND STUDY — tight % band, date range, next-day-only. The touch is detected
-// against the day's INTRADAY HIGH (or low for a down-band), not the close, so
-// a stock that spikes 19.5% and fades to close +15% still counts — that's the
-// whole point versus close-only detection.
+// BAND STUDY — tight % band, checked against the day's INTRADAY HIGH (or LOW
+// for a down-band), not the close — a stock that spikes 19.5% and fades to
+// close +15% still counts, which is the whole point versus close-only
+// detection. Tracks `before_days` trading days leading up to each touch and
+// `follow_days` after it; either can be viewed alone or all at once, and any
+// touch can be graphed as a before/after bar chart, all without re-scanning.
 // =============================================================================
-function BandStudy() {
-  const [startDate, setStartDate] = useState("2026-01-01");
+function BandStudy({ singleDate }) {
+  const [startDate, setStartDate] = useState(singleDate ? todayMinusDays(30) : "2026-01-01");
   const [endDate, setEndDate] = useState("2026-01-31");
   const [direction, setDirection] = useState("up");
   const [bandLow, setBandLow] = useState(19);
   const [bandHigh, setBandHigh] = useState(20);
   const [source, setSource] = useState("bhavcopy");
-  const [followDays, setFollowDays] = useState(5);
-  // Which day-offset the results table is showing. Set after a run loads, and
-  // switchable without re-scanning — every tracked day is already in the data.
+  const [followDays, setFollowDays] = useState(singleDate ? 10 : 5);
+  const [beforeDays, setBeforeDays] = useState(singleDate ? 5 : 0);
+  // Which day-offset the results table is showing. 0 means "all tracked days".
   const [viewDay, setViewDay] = useState(1);
+  const [selectedTouch, setSelectedTouch] = useState(null);
+  // "all" | "up" | "down" — filters the touches table to only rows that rose
+  // (or fell) on the day being viewed (the touch day's own move when "All
+  // days" is selected, since there's no single day to judge by there).
+  const [outcomeFilter, setOutcomeFilter] = useState("all");
 
   const [run, setRun] = useState(null);
   const [runs, setRuns] = useState([]);
   const [status, setStatus] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
-  const [sort, setSort] = useState({ key: "_pct", dir: "asc" }); // asc: biggest falls first
+  // key: null means "normal" (the original, unsorted order the backend returned).
+  const [sort, setSort] = useState({ key: null, dir: null });
   const pollRef = useRef(null);
 
   async function loadHistory() {
@@ -92,6 +119,9 @@ function BandStudy() {
       const d = await api.getBandStudyRun(id);
       setRun(d);
       setViewDay(1); // a freshly loaded run always starts on day 1
+      setSelectedTouch(null);
+      setSort({ key: null, dir: null }); // and on the table's normal (unsorted) order
+      setOutcomeFilter("all");
     } catch (e) {
       setError(e);
     } finally {
@@ -102,7 +132,11 @@ function BandStudy() {
   useEffect(() => {
     (async () => {
       const list = await loadHistory();
-      const latestDone = list.find((r) => r.status === "done");
+      // Single date and band study share one run history — only resume a run
+      // that matches this mode (single-day range vs multi-day range).
+      const latestDone = list.find(
+        (r) => r.status === "done" && (singleDate ? r.start_date === r.end_date : r.start_date !== r.end_date)
+      );
       if (latestDone) await loadRun(latestDone.id);
       else setLoading(false);
     })();
@@ -133,12 +167,13 @@ function BandStudy() {
     try {
       const r = await api.runBandStudy({
         start_date: startDate,
-        end_date: endDate,
+        end_date: singleDate ? startDate : endDate,
         direction,
         band_low: Number(bandLow),
         band_high: Number(bandHigh),
         source,
         follow_days: Number(followDays),
+        before_days: Number(beforeDays),
       });
       setStatus(r.status);
       startPolling();
@@ -151,47 +186,83 @@ function BandStudy() {
 
   const touches = run?.touches ?? [];
   const runFollowDays = run?.run?.follow_days ?? 1;
+  const runBeforeDays = run?.run?.before_days ?? 0;
+
+  // A day entry can live in either follow_days (offset > 0) or before_days
+  // (offset < 0) — this is the one place that knows which list to search.
+  function findDay(touch, offset) {
+    const list = offset >= 0 ? touch.follow_days : touch.before_days;
+    return (list ?? []).find((d) => d.offset === offset) ?? null;
+  }
 
   // Attach the currently-viewed day's numbers to each touch, so sorting and
   // rendering both work off one shape regardless of which day is selected.
   // viewDay === 0 means "all days" — no single day is flattened in.
   const rows = useMemo(() => {
     return touches.map((t) => {
-      const days = t.follow_days ?? [];
-      const d = viewDay > 0 ? days.find((x) => x.offset === viewDay) : null;
-      return { ...t, _day: d ?? null, _pct: d ? d.pct_from_touch : null };
+      const d = viewDay !== 0 ? findDay(t, viewDay) : null;
+      // The value "up only"/"down only" judges by: the viewed day's move, or
+      // the touch day's own move when "All days" is selected (no single day
+      // to judge by there).
+      const outcomeVal = viewDay !== 0 ? (d ? d.pct_from_touch : null) : t.close_pct;
+      return { ...t, _day: d, _pct: d ? d.pct_from_touch : null, _outcome: outcomeVal };
     });
   }, [touches, viewDay]);
 
   const sortedTouches = useMemo(() => {
     const { key, dir } = sort;
+    if (!key || !dir) return rows; // "normal": whatever order the backend returned
     const mul = dir === "asc" ? 1 : -1;
     return [...rows].sort((a, b) => {
-      const av = key === "_pct" ? a._pct : a[key];
-      const bv = key === "_pct" ? b._pct : b[key];
+      const av = sortValue(a, key, viewDay, findDay);
+      const bv = sortValue(b, key, viewDay, findDay);
       if (av == null && bv == null) return 0;
-      if (av == null) return 1;  // rows with no data this far out sink to the bottom
+      if (av == null) return 1;  // rows with no data this far out (or this column) sink to the bottom
       if (bv == null) return -1;
+      if (typeof av === "string" && typeof bv === "string") return av.localeCompare(bv) * mul;
       return (av - bv) * mul;
     });
-  }, [rows, sort]);
+  }, [rows, sort, viewDay]);
 
+  const visibleTouches = useMemo(() => {
+    if (outcomeFilter === "all") return sortedTouches;
+    return sortedTouches.filter((t) =>
+      outcomeFilter === "up" ? t._outcome > 0 : t._outcome != null && t._outcome < 0
+    );
+  }, [sortedTouches, outcomeFilter]);
+
+  const upCount = rows.filter((t) => t._outcome > 0).length;
+  const downCount = rows.filter((t) => t._outcome != null && t._outcome < 0).length;
+
+  // Click cycle per heading: normal -> ascending -> descending -> normal again.
   function toggleSort(key) {
-    setSort((s) => (s.key === key ? { key, dir: s.dir === "asc" ? "desc" : "asc" } : { key, dir: "asc" }));
+    setSort((s) => {
+      if (s.key !== key) return { key, dir: "asc" };
+      if (s.dir === "asc") return { key, dir: "desc" };
+      return { key: null, dir: null };
+    });
   }
   const arrow = (key) => (sort.key === key ? (sort.dir === "asc" ? " ↑" : " ↓") : "");
 
   return (
     <>
       <form className="card" onSubmit={runStudy}>
-        <div className="card-title">Run a band study</div>
+        <div className="card-title">{singleDate ? "Check a single date" : "Run a band study"}</div>
         <div className="row">
-          <label>Start date
-            <input type="date" value={startDate} max={todayMinusDays(1)} onChange={(e) => setStartDate(e.target.value)} />
-          </label>
-          <label>End date
-            <input type="date" value={endDate} max={todayMinusDays(1)} onChange={(e) => setEndDate(e.target.value)} />
-          </label>
+          {singleDate ? (
+            <label>Date to check
+              <input type="date" value={startDate} max={todayMinusDays(1)} onChange={(e) => setStartDate(e.target.value)} />
+            </label>
+          ) : (
+            <>
+              <label>Start date
+                <input type="date" value={startDate} max={todayMinusDays(1)} onChange={(e) => setStartDate(e.target.value)} />
+              </label>
+              <label>End date
+                <input type="date" value={endDate} max={todayMinusDays(1)} onChange={(e) => setEndDate(e.target.value)} />
+              </label>
+            </>
+          )}
           <label>Direction
             <select value={direction} onChange={(e) => setDirection(e.target.value)}>
               <option value="up">Spikes up (short thesis)</option>
@@ -203,6 +274,10 @@ function BandStudy() {
           </label>
           <label>Band high (%)
             <input type="number" min="1" max="100" value={bandHigh} onChange={(e) => setBandHigh(e.target.value)} />
+          </label>
+          <label>Before days
+            <input type="number" min="0" max="30" value={beforeDays}
+              onChange={(e) => setBeforeDays(e.target.value)} />
           </label>
           <label>Follow-up days
             <input type="number" min="1" max="30" value={followDays}
@@ -216,9 +291,10 @@ function BandStudy() {
           </label>
         </div>
         <p className="muted" style={{ fontSize: 12, margin: "0 0 8px" }}>
-          Follow-up days are <strong>trading</strong> days after each touch, so weekends and holidays never
-          consume one — and the window runs past the end date when it needs to (a touch on 31 Jan is still
-          followed into February). After the scan you can view any single day, or all of them.
+          Both windows are <strong>trading</strong> days, so weekends and holidays never consume one —
+          before days look back from each touch, follow-up days run past the end date when they need to
+          (a touch on 31 Jan is still followed into February). After the scan you can view any single day,
+          or all of them, and click a stock to see its before/after move as a bar chart.
         </p>
         {source === "bhavcopy" && (
           <p className="muted" style={{ fontSize: 12, margin: "0 0 8px" }}>
@@ -228,7 +304,7 @@ function BandStudy() {
           </p>
         )}
         <button className="primary" disabled={running}>
-          {running ? "Running…" : "Run band study"}
+          {running ? "Running…" : singleDate ? "Check this date" : "Run band study"}
         </button>
 
         {status && (running || status.status === "error") && (
@@ -243,7 +319,7 @@ function BandStudy() {
                 </div>
               </>
             ) : (
-              <div className="inline-error">Band study failed: {status.error}</div>
+              <div className="inline-error">{singleDate ? "Check" : "Band study"} failed: {status.error}</div>
             )}
           </div>
         )}
@@ -253,22 +329,25 @@ function BandStudy() {
         <div className="card" style={{ padding: "12px 16px" }}>
           <div className="card-title" style={{ marginBottom: 8 }}>Past runs</div>
           <div className="row" style={{ gap: 8 }}>
-            {runs.map((r) => (
-              <button
-                key={r.id}
-                className={`small ${run?.run?.id === r.id ? "primary" : ""}`}
-                onClick={() => loadRun(r.id)}
-                title={r.status}
-              >
-                {r.start_date} → {r.end_date} ({r.band_low}–{r.band_high}%, {r.source})
-                {r.status === "done" ? ` · ${r.total_touches} touches` : ` (${r.status})`}
-              </button>
-            ))}
+            {runs
+              .filter((r) => (singleDate ? r.start_date === r.end_date : r.start_date !== r.end_date))
+              .map((r) => (
+                <button
+                  key={r.id}
+                  className={`small ${run?.run?.id === r.id ? "primary" : ""}`}
+                  onClick={() => loadRun(r.id)}
+                  title={r.status}
+                >
+                  {r.start_date === r.end_date ? r.start_date : `${r.start_date} → ${r.end_date}`}
+                  {" "}({r.band_low}–{r.band_high}%, {r.source})
+                  {r.status === "done" ? ` · ${r.total_touches} touches` : ` (${r.status})`}
+                </button>
+              ))}
           </div>
         </div>
       )}
 
-      {loading && <Loading label="Loading band study…" />}
+      {loading && <Loading label="Loading…" />}
       <ErrorBanner error={error} onRetry={() => run?.run?.id && loadRun(run.run.id)} />
 
       {run && run.run.status === "error" && (
@@ -286,24 +365,41 @@ function BandStudy() {
       {run && run.run.status === "done" && touches.length > 0 && (
         <BandStudyResult
           run={run.run}
-          touches={sortedTouches}
+          touches={visibleTouches}
+          totalCount={touches.length}
           onSort={toggleSort}
           sortArrow={arrow}
           viewDay={viewDay}
           onViewDay={setViewDay}
           followDays={runFollowDays}
+          beforeDays={runBeforeDays}
+          selectedTouch={selectedTouch}
+          onSelectTouch={setSelectedTouch}
+          findDay={findDay}
+          outcomeFilter={outcomeFilter}
+          onOutcomeFilter={setOutcomeFilter}
+          upCount={upCount}
+          downCount={downCount}
         />
       )}
     </>
   );
 }
 
-function BandStudyResult({ run, touches, onSort, sortArrow, viewDay, onViewDay, followDays }) {
+function BandStudyResult({
+  run, touches, totalCount, onSort, sortArrow, viewDay, onViewDay, followDays, beforeDays,
+  selectedTouch, onSelectTouch, findDay, outcomeFilter, onOutcomeFilter, upCount, downCount,
+}) {
   const flaggedCount = touches.filter((t) => t.corporate_action_suspected).length;
   const perDay = run.per_day ?? [];
+  const perBeforeDay = run.per_before_day ?? [];
   const dayOffsets = Array.from({ length: followDays }, (_, i) => i + 1);
-  const selected = perDay.find((d) => d.offset === viewDay) ?? null;
+  const beforeOffsets = Array.from({ length: beforeDays }, (_, i) => i - beforeDays); // -N ... -1
+  const allOffsets = [...beforeOffsets, ...dayOffsets];
+  const allPerDay = [...perBeforeDay, ...perDay];
+  const selected = allPerDay.find((d) => d.offset === viewDay) ?? null;
   const showingAll = viewDay === 0;
+  const dayLabel = (n) => (n > 0 ? `Day +${n}` : `Day ${n}`);
 
   return (
     <>
@@ -330,16 +426,16 @@ function BandStudyResult({ run, touches, onSort, sortArrow, viewDay, onViewDay, 
           changes the view instantly without re-scanning. */}
       <div className="card" style={{ padding: "12px 16px" }}>
         <div className="card-title" style={{ marginBottom: 8 }}>
-          Showing {showingAll ? `all ${followDays} days` : `day ${viewDay} after the touch`}
+          Showing {showingAll ? `all ${allOffsets.length} tracked days` : `${dayLabel(viewDay)} relative to the touch`}
         </div>
-        <div className="seg" style={{ marginBottom: 0 }}>
-          {dayOffsets.map((n) => (
+        <div className="seg" style={{ marginBottom: 0, flexWrap: "wrap" }}>
+          {allOffsets.map((n) => (
             <button key={n} type="button" className={viewDay === n ? "on" : ""} onClick={() => onViewDay(n)}>
-              Day {n}
+              {dayLabel(n)}
             </button>
           ))}
           <button type="button" className={showingAll ? "on" : ""} onClick={() => onViewDay(0)}>
-            All {followDays}
+            All {allOffsets.length}
           </button>
         </div>
       </div>
@@ -348,26 +444,32 @@ function BandStudyResult({ run, touches, onSort, sortArrow, viewDay, onViewDay, 
       <div className="summary-row">
         <Stat label="Total touches" value={run.total_touches} />
         <Stat
-          label={showingAll ? "Scored on day 1" : `Scored on day ${viewDay}`}
+          label={showingAll ? "Scored on day 1" : `Scored on ${dayLabel(viewDay)}`}
           value={showingAll ? (perDay[0]?.scored ?? 0) : (selected?.scored ?? 0)}
         />
         <Stat
-          label={showingAll ? "Up by day 1" : `Up by day ${viewDay}`}
+          label={showingAll ? "Up by day 1" : `Up by ${dayLabel(viewDay)}`}
           value={`${(showingAll ? perDay[0]?.up_pct : selected?.up_pct) ?? 0}%`}
           cls="pos"
         />
         <Stat
-          label={showingAll ? "Down by day 1" : `Down by day ${viewDay}`}
+          label={showingAll ? "Down by day 1" : `Down by ${dayLabel(viewDay)}`}
           value={`${(showingAll ? perDay[0]?.down_pct : selected?.down_pct) ?? 0}%`}
           cls="neg"
         />
       </div>
 
+      {/* The per-touch graph — click any stock below to see it here. */}
+      {selectedTouch && (
+        <TouchBarChart touch={selectedTouch} beforeOffsets={beforeOffsets} dayOffsets={dayOffsets} findDay={findDay} onClose={() => onSelectTouch(null)} />
+      )}
+
       {/* The report: every tracked day, up and down kept separate. Cumulative
-          from the touch close, so day 3 answers "where is it now, 3 days on?" */}
+          from the touch day's close, so "day +3" answers "where is it now, 3
+          days on?" and "day -3" answers "where was it, 3 days before?" */}
       <div className="card">
         <div className="card-title">
-          Cumulative move by each day after the touch (up vs down kept separate)
+          Cumulative move by each tracked day (up vs down kept separate)
         </div>
         <table className="table">
           <thead>
@@ -381,14 +483,14 @@ function BandStudyResult({ run, touches, onSort, sortArrow, viewDay, onViewDay, 
             </tr>
           </thead>
           <tbody>
-            {perDay.map((d) => (
+            {allPerDay.map((d) => (
               <tr
                 key={d.offset}
                 className="clickable"
                 onClick={() => onViewDay(d.offset)}
                 style={!showingAll && d.offset === viewDay ? { background: "var(--accent-soft)" } : undefined}
               >
-                <td><strong>Day {d.offset}</strong></td>
+                <td><strong>{dayLabel(d.offset)}</strong></td>
                 <td className="num">{d.scored}</td>
                 <td className="num">{d.up_count} <span className="muted">({d.up_pct}%)</span></td>
                 <td className="num pos">{d.avg_pct_up != null ? pct(d.avg_pct_up) : "—"}</td>
@@ -403,32 +505,56 @@ function BandStudyResult({ run, touches, onSort, sortArrow, viewDay, onViewDay, 
       {/* Every touch, shown separately */}
       <section className="card">
         <div className="card-title">
-          {run.start_date} → {run.end_date} — every {run.direction === "up" ? "spike" : "drop"} that touched {run.band_low}–{run.band_high}%
+          {run.start_date === run.end_date ? run.start_date : `${run.start_date} → ${run.end_date}`} — every{" "}
+          {run.direction === "up" ? "spike" : "drop"} that touched {run.band_low}–{run.band_high}%
         </div>
+        <div className="seg" style={{ marginBottom: 12 }}>
+          <button type="button" className={outcomeFilter === "all" ? "on" : ""} onClick={() => onOutcomeFilter("all")}>
+            All {totalCount}
+          </button>
+          <button type="button" className={outcomeFilter === "up" ? "on" : ""} onClick={() => onOutcomeFilter("up")}>
+            Up only ({upCount})
+          </button>
+          <button type="button" className={outcomeFilter === "down" ? "on" : ""} onClick={() => onOutcomeFilter("down")}>
+            Down only ({downCount})
+          </button>
+        </div>
+        {touches.length === 0 && (
+          <p className="muted" style={{ margin: "0 0 12px" }}>
+            No touches {outcomeFilter === "up" ? "rose" : "fell"} on {showingAll ? "the touch day" : dayLabel(viewDay)} — try the other filter.
+          </p>
+        )}
         <table className="table screener-table">
           <thead>
             <tr>
-              <th>Symbol</th>
-              <th className="num">Touch date</th>
-              <th className="num">Touch %</th>
-              <th className="num">Close %</th>
+              <th className="sortable" onClick={() => onSort("symbol")}>Symbol{sortArrow("symbol")}</th>
+              <th className="num sortable" onClick={() => onSort("date")}>Touch date{sortArrow("date")}</th>
+              <th className="num sortable" onClick={() => onSort("touch_pct")}>Touch %{sortArrow("touch_pct")}</th>
+              <th className="num sortable" onClick={() => onSort("close_pct")}>Close %{sortArrow("close_pct")}</th>
               {showingAll ? (
-                dayOffsets.map((n) => <th key={n} className="num">D{n}</th>)
+                allOffsets.map((n) => (
+                  <th key={n} className="num sortable" onClick={() => onSort(`offset:${n}`)}>
+                    D{n}{sortArrow(`offset:${n}`)}
+                  </th>
+                ))
               ) : (
                 <>
-                  <th className="num">Date</th>
+                  <th className="num sortable" onClick={() => onSort("_day_date")}>Date{sortArrow("_day_date")}</th>
                   <th className="num sortable" onClick={() => onSort("_pct")}>
-                    Day-{viewDay} change{sortArrow("_pct")}
+                    {dayLabel(viewDay)} change{sortArrow("_pct")}
                   </th>
-                  <th className="num">Open→close</th>
+                  <th className="num sortable" onClick={() => onSort("_open_close")}>
+                    Open→close{sortArrow("_open_close")}
+                  </th>
                   <th></th>
                 </>
               )}
+              <th>Graph</th>
             </tr>
           </thead>
           <tbody>
             {touches.map((t) => {
-              const byOffset = new Map((t.follow_days ?? []).map((d) => [d.offset, d]));
+              const isSelected = selectedTouch && selectedTouch.symbol === t.symbol && selectedTouch.date === t.date;
               return (
                 <tr key={`${t.symbol}-${t.date}`} style={t.corporate_action_suspected ? { opacity: 0.55 } : undefined}>
                   <td>
@@ -445,8 +571,8 @@ function BandStudyResult({ run, touches, onSort, sortArrow, viewDay, onViewDay, 
                   <td className="num">{pct(t.close_pct)}</td>
 
                   {showingAll ? (
-                    dayOffsets.map((n) => {
-                      const d = byOffset.get(n);
+                    allOffsets.map((n) => {
+                      const d = findDay(t, n);
                       return (
                         <td
                           key={n}
@@ -477,6 +603,15 @@ function BandStudyResult({ run, touches, onSort, sortArrow, viewDay, onViewDay, 
                       </td>
                     </>
                   )}
+                  <td>
+                    <button
+                      type="button"
+                      className={`small ${isSelected ? "primary" : ""}`}
+                      onClick={() => onSelectTouch(isSelected ? null : t)}
+                    >
+                      {isSelected ? "Hide" : "Chart"}
+                    </button>
+                  </td>
                 </tr>
               );
             })}
@@ -487,239 +622,88 @@ function BandStudyResult({ run, touches, onSort, sortArrow, viewDay, onViewDay, 
   );
 }
 
-// =============================================================================
-// SINGLE DATE — one day, wide threshold, multi-week walk-forward (peak /
-// first-red / round-trip). The original tool, kept as its own mode.
-// =============================================================================
-function SingleDateBacktest() {
-  const [targetDate, setTargetDate] = useState(todayMinusDays(90));
-  const [direction, setDirection] = useState("up");
-  const [thresholdPct, setThresholdPct] = useState(20);
-  const [windowDays, setWindowDays] = useState(30);
+// A neat before/touch/after bar chart for one stock's move around its spike —
+// self-contained inline SVG so it stays theme-aware with zero extra deps.
+function TouchBarChart({ touch, beforeOffsets, dayOffsets, findDay, onClose }) {
+  const points = useMemo(() => {
+    const before = beforeOffsets.map((n) => {
+      const d = findDay(touch, n);
+      return { offset: n, label: `D${n}`, date: d?.date ?? null, pct: d ? d.pct_from_touch : null };
+    });
+    const touchPoint = { offset: 0, label: "Touch", date: touch.date, pct: touch.close_pct, isTouch: true };
+    const after = dayOffsets.map((n) => {
+      const d = findDay(touch, n);
+      return { offset: n, label: `D+${n}`, date: d?.date ?? null, pct: d ? d.pct_from_touch : null };
+    });
+    return [...before, touchPoint, ...after];
+  }, [touch, beforeOffsets, dayOffsets, findDay]);
 
-  const [run, setRun] = useState(null);
-  const [runs, setRuns] = useState([]);
-  const [status, setStatus] = useState(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState(null);
-  const pollRef = useRef(null);
-
-  async function loadHistory() {
-    try {
-      const d = await api.listBacktestRuns();
-      setRuns(d.runs ?? []);
-      return d.runs ?? [];
-    } catch {
-      return [];
-    }
-  }
-
-  async function loadRun(id) {
-    setLoading(true);
-    try {
-      setRun(await api.getBacktestRun(id));
-    } catch (e) {
-      setError(e);
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  useEffect(() => {
-    (async () => {
-      const list = await loadHistory();
-      const latestDone = list.find((r) => r.status === "done");
-      if (latestDone) await loadRun(latestDone.id);
-      else setLoading(false);
-    })();
-    return () => clearInterval(pollRef.current);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  function startPolling() {
-    clearInterval(pollRef.current);
-    pollRef.current = setInterval(async () => {
-      try {
-        const st = await api.backtestStatus();
-        setStatus(st);
-        if (st.status === "done" || st.status === "error") {
-          clearInterval(pollRef.current);
-          await loadHistory();
-          if (st.status === "done" && st.run_id) await loadRun(st.run_id);
-        }
-      } catch {
-        clearInterval(pollRef.current);
-      }
-    }, 1500);
-  }
-
-  async function runBacktest(e) {
-    e.preventDefault();
-    setError(null);
-    try {
-      const r = await api.runBacktest({
-        target_date: targetDate,
-        direction,
-        threshold_pct: Number(thresholdPct),
-        window_days: Number(windowDays),
-      });
-      setStatus(r.status);
-      startPolling();
-    } catch (e) {
-      setError(e);
-    }
-  }
-
-  const running = status?.status === "running";
+  const values = points.map((p) => p.pct).filter((v) => v != null);
+  const maxAbs = Math.max(1, ...values.map((v) => Math.abs(v)));
+  const barW = 30, gap = 8, chartH = 170, padTop = 20, padBottom = 46;
+  const width = points.length * (barW + gap) + gap;
+  const height = chartH + padTop + padBottom;
+  const zeroY = padTop + chartH / 2;
+  const scale = (chartH / 2 - 10) / maxAbs;
 
   return (
-    <>
-      <form className="card" onSubmit={runBacktest}>
-        <div className="card-title">Run a backtest</div>
-        <div className="row">
-          <label>Date to replay
-            <input type="date" value={targetDate} max={todayMinusDays(1)}
-              onChange={(e) => setTargetDate(e.target.value)} />
-          </label>
-          <label>Direction
-            <select value={direction} onChange={(e) => setDirection(e.target.value)}>
-              <option value="up">Spikes up (short thesis)</option>
-              <option value="down">Drops down (bounce thesis)</option>
-            </select>
-          </label>
-          <label>Move threshold (%)
-            <input type="number" min="1" max="100" value={thresholdPct}
-              onChange={(e) => setThresholdPct(e.target.value)} />
-          </label>
-          <label>Tracking window (days)
-            <input type="number" min="1" max="90" value={windowDays}
-              onChange={(e) => setWindowDays(e.target.value)} />
-          </label>
-        </div>
-        <button className="primary" disabled={running}>
-          {running ? "Running…" : "Run backtest"}
-        </button>
-
-        {status && (running || status.status === "error") && (
-          <div style={{ marginTop: 12 }}>
-            {running ? (
-              <>
-                <div className="progress-track">
-                  <div className="progress-fill" style={{ width: `${status.percent || 0}%` }} />
-                </div>
-                <div className="muted" style={{ fontSize: 13, marginTop: 4 }}>
-                  {status.message || "Working…"} ({status.percent || 0}%)
-                </div>
-              </>
-            ) : (
-              <div className="inline-error">Backtest failed: {status.error}</div>
-            )}
-          </div>
-        )}
-      </form>
-
-      {runs.length > 0 && (
-        <div className="card" style={{ padding: "12px 16px" }}>
-          <div className="card-title" style={{ marginBottom: 8 }}>Past runs</div>
-          <div className="row" style={{ gap: 8 }}>
-            {runs.map((r) => (
-              <button
-                key={r.id}
-                className={`small ${run?.run?.id === r.id ? "primary" : ""}`}
-                onClick={() => loadRun(r.id)}
-                title={r.status}
-              >
-                {r.target_date} {r.status === "done" ? `· ${r.reverted_pct ?? 0}%` : `(${r.status})`}
-              </button>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {loading && <Loading label="Loading backtest…" />}
-      <ErrorBanner error={error} onRetry={() => run?.run?.id && loadRun(run.run.id)} />
-
-      {run && <BacktestResult detail={run} />}
-    </>
-  );
-}
-
-function BacktestResult({ detail }) {
-  const { run, movers } = detail;
-  if (run.status === "error") {
-    return <div className="card"><div className="inline-error">This run failed: {run.error}</div></div>;
-  }
-  if (!movers || movers.length === 0) {
-    return (
-      <div className="card">
-        <p className="muted" style={{ margin: 0 }}>
-          No stocks moved {run.threshold_pct}%+ on {run.target_date} — try a different date or a lower threshold.
-        </p>
+    <div className="card">
+      <div className="card-title">
+        <span>
+          {touch.symbol} <span className="muted" style={{ fontWeight: 400 }}>{touch.name}</span> — before/after the{" "}
+          {touch.date} touch ({touch.touch_pct >= 0 ? "+" : ""}{touch.touch_pct}%)
+        </span>
+        <button type="button" className="small" onClick={onClose}>Close</button>
       </div>
-    );
-  }
-
-  const revertedPct = run.reverted_pct ?? 0;
-  const avgDays = movers.filter((m) => m.reverted).map((m) => m.round_trip_offset_days);
-  const avgDaysToRevert = avgDays.length ? (avgDays.reduce((a, b) => a + b, 0) / avgDays.length).toFixed(1) : "—";
-
-  return (
-    <>
-      {run.missing_count > 0 && (
-        <div className="inline-error" style={{ marginBottom: 12 }}>
-          <strong>{run.missing_count} symbol{run.missing_count === 1 ? "" : "s"} could not be fetched</strong> even
-          after a retry, so this run's coverage is incomplete: {run.missing_symbols.join(", ")}.
-        </div>
-      )}
-
-      <div className="summary-row">
-        <Stat label="Movers found" value={run.mover_count} />
-        <Stat label="Reverted" value={`${revertedPct}%`} cls={revertedPct >= 50 ? "pos" : "neg"} />
-        <Stat label="Avg days to revert" value={avgDaysToRevert} />
-        <Stat label="Window" value={`${run.window_days}d`} />
+      <div style={{ overflowX: "auto" }}>
+        <svg viewBox={`0 0 ${width} ${height}`} width={width} height={height} style={{ display: "block" }}>
+          <line x1={0} y1={zeroY} x2={width} y2={zeroY} stroke="var(--line)" strokeWidth="1" />
+          {points.map((p, i) => {
+            const x = gap + i * (barW + gap);
+            if (p.pct == null) {
+              return (
+                <text key={i} x={x + barW / 2} y={zeroY + 4} textAnchor="middle" fontSize="10" fill="var(--muted)">—</text>
+              );
+            }
+            const h = Math.max(Math.abs(p.pct) * scale, 1);
+            const y = p.pct >= 0 ? zeroY - h : zeroY;
+            const color = p.isTouch ? "var(--accent)" : p.pct >= 0 ? "var(--pos)" : "var(--neg)";
+            return (
+              <g key={i}>
+                <rect x={x} y={y} width={barW} height={h} fill={color} rx="2" />
+                <text
+                  x={x + barW / 2}
+                  y={p.pct >= 0 ? y - 4 : y + h + 12}
+                  textAnchor="middle"
+                  fontSize="10"
+                  fontWeight={p.isTouch ? 700 : 400}
+                  fill="var(--text)"
+                >
+                  {p.pct >= 0 ? "+" : ""}{p.pct.toFixed(1)}%
+                </text>
+              </g>
+            );
+          })}
+          {points.map((p, i) => {
+            const x = gap + i * (barW + gap);
+            return (
+              <g key={`label-${i}`}>
+                <text x={x + barW / 2} y={height - 30} textAnchor="middle" fontSize="10" fontWeight={p.isTouch ? 700 : 400} fill="var(--muted)">
+                  {p.label}
+                </text>
+                <text x={x + barW / 2} y={height - 16} textAnchor="middle" fontSize="9" fill="var(--muted)">
+                  {p.date ?? ""}
+                </text>
+              </g>
+            );
+          })}
+        </svg>
       </div>
-
-      <section className="card">
-        <div className="card-title">
-          {run.target_date} — {run.direction === "up" ? "gainers" : "losers"} of {run.threshold_pct}%+
-        </div>
-        <table className="table">
-          <thead>
-            <tr>
-              <th>Symbol</th><th>Path</th><th className="num">Spike</th>
-              <th className="num">Peak</th><th className="num">First red</th>
-              <th className="num">Round trip</th><th className="num">RSI</th>
-              <th className="num">Vol×</th><th>Outcome</th>
-            </tr>
-          </thead>
-          <tbody>
-            {movers.map((m) => (
-              <tr key={m.symbol}>
-                <td>
-                  <strong>{m.symbol}</strong>
-                  <div className="muted" style={{ fontSize: 12 }}>{m.name}</div>
-                </td>
-                <td><Sparkline values={m.spark} /></td>
-                <td className={`num ${m.direction === "up" ? "pos" : "neg"}`}>{pct(m.spike_pct)}</td>
-                <td className="num">
-                  {rupees(m.peak_price)}
-                  {m.peak_offset_days > 0 && <span className="muted"> (+{m.peak_offset_days}d)</span>}
-                </td>
-                <td className="num">{m.first_red_offset_days != null ? `${m.first_red_offset_days}d` : "—"}</td>
-                <td className="num">{m.round_trip_offset_days != null ? `${m.round_trip_offset_days}d` : "—"}</td>
-                <td className="num">{m.rsi != null ? m.rsi : "—"}</td>
-                <td className="num">{m.vol_ratio ? `${m.vol_ratio}×` : "—"}</td>
-                <td>
-                  <span className={`tag ${m.reverted ? "buy" : "sell"}`}>
-                    {m.reverted ? "reverted" : "held / kept going"}
-                  </span>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </section>
-    </>
+      <p className="muted" style={{ fontSize: 12, margin: "8px 0 0" }}>
+        Before/after bars are cumulative % move from the touch day's close (offset 0). The touch bar itself
+        (black) is that session's own open→close move — what the spike actually looked like.
+      </p>
+    </div>
   );
 }
 
