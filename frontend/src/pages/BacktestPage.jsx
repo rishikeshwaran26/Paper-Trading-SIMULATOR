@@ -30,15 +30,18 @@ function todayMinusDays(days) {
 // Resolves any sortable column's value for one touch. `offset:<n>` keys cover
 // the per-day columns shown in the "all days" table view; the rest cover the
 // fixed columns shown in the single-day view.
-function sortValue(t, key, viewDay, findDay) {
+function sortValue(t, key, viewDay, findDay, metric = "close") {
+  // The per-day columns sort on whichever move is currently being scored, so
+  // the ordering always matches the numbers actually on screen.
+  const move = (d) => (d == null ? null : metric === "intraday" ? d.open_close_pct : d.pct_from_touch);
   if (key === "symbol") return t.symbol;
   if (key === "date") return t.date;
   if (key === "touch_pct") return t.touch_pct;
   if (key === "close_pct") return t.close_pct;
   if (key === "_day_date") return findDay(t, viewDay)?.date ?? null;
-  if (key === "_pct") return findDay(t, viewDay)?.pct_from_touch ?? null;
+  if (key === "_pct") return move(findDay(t, viewDay)) ?? null;
   if (key === "_open_close") return findDay(t, viewDay)?.open_close_pct ?? null;
-  if (key.startsWith("offset:")) return findDay(t, Number(key.slice(7)))?.pct_from_touch ?? null;
+  if (key.startsWith("offset:")) return move(findDay(t, Number(key.slice(7)))) ?? null;
   return null;
 }
 
@@ -73,6 +76,18 @@ function beforeWindowMove(t, span) {
   return ((near.close - far.close) / far.close) * 100;
 }
 
+// Did the stock close at (or within a whisker of) its own high?
+//
+// On a 19-20% touch that almost always means it was locked at the upper
+// circuit: only buyers, no sellers, so there was nobody to sell to and the
+// short could not have been opened at all. Counting those in a short-selling
+// study measures trades nobody could have placed, which is why they are
+// excluded by default rather than offered as a neutral filter.
+function isCircuitLocked(t) {
+  if (t.touch_pct == null || t.close_pct == null) return false;
+  return Math.abs(t.touch_pct - t.close_pct) <= 0.15;
+}
+
 // The move a beforeMove filter is testing, for one touch. null = unjudgeable.
 function beforeMoveValue(t, bm, span) {
   return bm.mode === "single" ? beforeDayOwnMove(t, bm.offset) : beforeWindowMove(t, span);
@@ -91,6 +106,9 @@ const DEFAULT_FILTERS = {
   // allowed to drive the prediction panel.
   viewBefore: null,
   viewAfter: null,
+  // Defaults to excluding circuit-locked touches: they were untradeable, so
+  // leaving them in overstates a strategy nobody could have run.
+  tradeable: "exclude_locked", // "exclude_locked" | "all" | "only_locked"
   beforeMove: {
     on: false,
     mode: "cumulative", // "cumulative" | "single"
@@ -108,12 +126,27 @@ const DEFAULT_FILTERS = {
 // is excluded from `scored` rather than counted as a flat 0% — a missing day is
 // not a zero move, and treating it as one would drag the averages toward
 // nothing.
-function summarizeOffset(touches, offset, direction = "up") {
+// What one intraday round trip costs in India, as a % of turnover: brokerage,
+// STT, stamp duty, exchange fees and GST, rounded to a realistic all-in figure
+// for a discount broker. Deducted from EV so the panel shows what a trade would
+// actually have kept — a gross EV of +0.1% is a losing trade once this is paid.
+const ROUND_TRIP_COST_PCT = 0.10;
+
+// `metric` picks WHICH move is being scored:
+//   "close"    — pct_from_touch: the touch day's close to this day's close.
+//                Contains the overnight gap between the two sessions.
+//   "intraday" — open_close_pct: this session's own open to its own close, the
+//                only part an intraday trade (in by 9:15, out by 3:30) actually
+//                captures. A stock can gap up overnight and still fall all day;
+//                "close" scores that as a rise, "intraday" as the fall it was.
+function summarizeOffset(touches, offset, direction = "up", metric = "close") {
   const moves = [];
   for (const t of touches) {
     const list = offset >= 0 ? t.follow_days : t.before_days;
     const d = (list ?? []).find((x) => x.offset === offset);
-    if (d) moves.push(d.pct_from_touch);
+    if (!d) continue;
+    const v = metric === "intraday" ? d.open_close_pct : d.pct_from_touch;
+    if (v != null) moves.push(v); // no open price -> unscorable, never a flat 0%
   }
   const up = moves.filter((m) => m > 0);
   const down = moves.filter((m) => m < 0);
@@ -122,15 +155,17 @@ function summarizeOffset(touches, offset, direction = "up") {
   const avg = (xs) => (xs.length ? r2(xs.reduce((a, b) => a + b, 0) / xs.length) : null);
   const share = (xs) => (scored ? Math.round((xs.length / scored) * 1000) / 10 : 0);
 
-  // Expected value of taking the thesis trade at the touch close, in % per
-  // trade. An "up" band study shorts the spike, so a negative move is a gain
-  // and EV is just the mean negated; a "down" study is the bounce thesis (a
-  // long), so the sign flips.
+  // Expected value of taking the thesis trade, in % per trade — entered at the
+  // touch close for "close", at that session's open for "intraday". An "up"
+  // band study shorts the spike, so a negative move is a gain and EV is just
+  // the mean negated; a "down" study is the bounce thesis (a long), so the
+  // sign flips.
   //
   // This is the number a high down-% can hide: a cohort can fall 6 times out
   // of 10 and still lose money if the 4 that rise, rise further.
   const meanPct = scored ? moves.reduce((a, b) => a + b, 0) / scored : null;
-  const ev = meanPct == null ? null : r2(direction === "up" ? -meanPct : meanPct);
+  const evGross = meanPct == null ? null : (direction === "up" ? -meanPct : meanPct);
+  const ev = evGross == null ? null : r2(evGross - ROUND_TRIP_COST_PCT);
 
   return {
     offset,
@@ -143,12 +178,14 @@ function summarizeOffset(touches, offset, direction = "up") {
     avg_pct_up: avg(up),
     avg_pct_down: avg(down),
     ev,
+    ev_gross: evGross == null ? null : r2(evGross),
   };
 }
 
 function countActiveFilters(f, runBefore, runAfter) {
   let n = 0;
   if (f.beforeMove.on) n++;
+  if (f.tradeable !== "exclude_locked") n++; // the default is itself a filter
   if (f.outcome !== "all") n++;
   if (f.viewBefore != null && f.viewBefore < runBefore) n++;
   if (f.viewAfter != null && f.viewAfter < runAfter) n++;
@@ -213,6 +250,9 @@ function BandStudy({ singleDate }) {
   //   viewAfter   — same for follow-days.
   const [filters, setFilters] = useState(DEFAULT_FILTERS);
   const [drawerOpen, setDrawerOpen] = useState(false);
+  // "close" | "intraday" — which move every score on this page is measured on.
+  // See summarizeOffset. Intraday is the honest one for a same-session trade.
+  const [metric, setMetric] = useState("close");
 
   const [run, setRun] = useState(null);
   const [runs, setRuns] = useState([]);
@@ -331,30 +371,31 @@ function BandStudy({ singleDate }) {
   // rendering both work off one shape regardless of which day is selected.
   // viewDay === 0 means "all days" — no single day is flattened in.
   const rows = useMemo(() => {
+    const dayMove = (d) => (d == null ? null : metric === "intraday" ? d.open_close_pct : d.pct_from_touch);
     return touches.map((t) => {
       const d = viewDay !== 0 ? findDay(t, viewDay) : null;
       // The value "up only"/"down only" judges by: the viewed day's move, or
-      // the touch day's own move when "All days" is selected (no single day
-      // to judge by there).
-      const outcomeVal = viewDay !== 0 ? (d ? d.pct_from_touch : null) : t.close_pct;
-      return { ...t, _day: d, _pct: d ? d.pct_from_touch : null, _outcome: outcomeVal };
+      // the touch day's own move when "All days" is selected (no single day to
+      // judge by there). Follows the metric so the filter agrees with the panel.
+      const outcomeVal = viewDay !== 0 ? dayMove(d) : t.close_pct;
+      return { ...t, _day: d, _pct: dayMove(d), _outcome: outcomeVal };
     });
-  }, [touches, viewDay]);
+  }, [touches, viewDay, metric]);
 
   const sortedTouches = useMemo(() => {
     const { key, dir } = sort;
     if (!key || !dir) return rows; // "normal": whatever order the backend returned
     const mul = dir === "asc" ? 1 : -1;
     return [...rows].sort((a, b) => {
-      const av = sortValue(a, key, viewDay, findDay);
-      const bv = sortValue(b, key, viewDay, findDay);
+      const av = sortValue(a, key, viewDay, findDay, metric);
+      const bv = sortValue(b, key, viewDay, findDay, metric);
       if (av == null && bv == null) return 0;
       if (av == null) return 1;  // rows with no data this far out (or this column) sink to the bottom
       if (bv == null) return -1;
       if (typeof av === "string" && typeof bv === "string") return av.localeCompare(bv) * mul;
       return (av - bv) * mul;
     });
-  }, [rows, sort, viewDay]);
+  }, [rows, sort, viewDay, metric]);
 
   // How many tracked days the drawer is currently letting through. Capped by
   // what the run actually scanned — you can narrow the view, never widen it
@@ -365,8 +406,12 @@ function BandStudy({ singleDate }) {
   // PRE-TRADE ONLY. Everything here was knowable before the trade would have
   // been placed, so it is legitimate to score a prediction on this set.
   const predictionTouches = useMemo(
-    () => sortedTouches.filter((t) => passesBeforeMove(t, filters.beforeMove, viewBefore)),
-    [sortedTouches, filters.beforeMove, viewBefore]
+    () => sortedTouches.filter((t) => {
+      if (filters.tradeable === "exclude_locked" && isCircuitLocked(t)) return false;
+      if (filters.tradeable === "only_locked" && !isCircuitLocked(t)) return false;
+      return passesBeforeMove(t, filters.beforeMove, viewBefore);
+    }),
+    [sortedTouches, filters.beforeMove, filters.tradeable, viewBefore]
   );
 
   // + the outcome filter. Rows only — never the panel, because the outcome is
@@ -378,6 +423,14 @@ function BandStudy({ singleDate }) {
       filters.outcome === "up" ? t._outcome > 0 : t._outcome != null && t._outcome < 0
     );
   }, [predictionTouches, filters.outcome]);
+
+  // Only what the circuit-lock rule ITSELF removed — a touch that the
+  // before-move filter would have dropped anyway is not counted here, so the
+  // note never overstates the exclusion.
+  const lockedExcluded = useMemo(() => {
+    if (filters.tradeable !== "exclude_locked") return 0;
+    return rows.filter((t) => isCircuitLocked(t) && passesBeforeMove(t, filters.beforeMove, viewBefore)).length;
+  }, [rows, filters.tradeable, filters.beforeMove, viewBefore]);
 
   const upCount = predictionTouches.filter((t) => t._outcome > 0).length;
   const downCount = predictionTouches.filter((t) => t._outcome != null && t._outcome < 0).length;
@@ -525,6 +578,9 @@ function BandStudy({ singleDate }) {
           totalCount={touches.length}
           outcomeFilter={filters.outcome}
           beforeMoveOn={filters.beforeMove.on}
+          lockedExcluded={lockedExcluded}
+          metric={metric}
+          onMetric={setMetric}
           onSort={toggleSort}
           sortArrow={arrow}
           viewDay={viewDay}
@@ -564,8 +620,8 @@ function BandStudy({ singleDate }) {
 }
 
 function BandStudyResult({
-  run, touches, predictionTouches, totalCount, outcomeFilter, beforeMoveOn, onSort, sortArrow,
-  viewDay, onViewDay, followDays, beforeDays,
+  run, touches, predictionTouches, totalCount, outcomeFilter, beforeMoveOn, lockedExcluded, metric, onMetric,
+  onSort, sortArrow, viewDay, onViewDay, followDays, beforeDays,
   selectedTouch, onSelectTouch, findDay, onOpenFilters, activeFilterCount,
 }) {
   const flaggedCount = touches.filter((t) => t.corporate_action_suspected).length;
@@ -580,9 +636,9 @@ function BandStudyResult({
   // were sliding into the touch, how many fell afterwards?" is a different
   // question from "of all touches...".
   const allPerDay = useMemo(
-    () => allOffsets.map((offset) => summarizeOffset(predictionTouches, offset, run.direction)),
+    () => allOffsets.map((offset) => summarizeOffset(predictionTouches, offset, run.direction, metric)),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [predictionTouches, followDays, beforeDays, run.direction]
+    [predictionTouches, followDays, beforeDays, run.direction, metric]
   );
   const selected = allPerDay.find((d) => d.offset === viewDay) ?? null;
   const showingAll = viewDay === 0;
@@ -610,6 +666,34 @@ function BandStudyResult({
           </span>
         </div>
       )}
+
+      {/* Which move every number on this page is scored on. Both are already in
+          the data, so switching is instant. */}
+      <div className="card" style={{ padding: "12px 16px" }}>
+        <div className="card-title" style={{ marginBottom: 8 }}>Score each day on</div>
+        <div className="seg" style={{ marginBottom: 8 }}>
+          <button type="button" className={metric === "close" ? "on" : ""} onClick={() => onMetric("close")}>
+            Close-to-close
+          </button>
+          <button type="button" className={metric === "intraday" ? "on" : ""} onClick={() => onMetric("intraday")}>
+            Open→close (intraday)
+          </button>
+        </div>
+        <p className="muted" style={{ fontSize: 12.5, margin: 0 }}>
+          {metric === "close" ? (
+            <>
+              Measured from the touch day's close, so it includes the <strong>overnight gap</strong> into each
+              session. Right for a position held overnight — but a same-session trade never gets that gap.
+            </>
+          ) : (
+            <>
+              Each session's own <strong>open to close</strong> — the only part an intraday trade (in after 9:15,
+              out before 3:30) actually captures. A stock can gap up overnight and still fall all day: close-to-close
+              scores that as a rise, this scores it as the fall it was.
+            </>
+          )}
+        </p>
+      </div>
 
       {/* Day switcher — every tracked day is already in the data, so this
           changes the view instantly without re-scanning. */}
@@ -661,11 +745,19 @@ function BandStudyResult({
           }
         />
         <Stat
-          label="EV per trade"
+          label="EV per trade (net)"
           value={panel?.ev != null ? pct(panel.ev) : "—"}
           cls={panel?.ev == null ? "" : panel.ev > 0 ? "pos" : "neg"}
         />
       </div>
+
+      {lockedExcluded > 0 && (
+        <p className="muted" style={{ fontSize: 12.5, margin: "-4px 0 14px" }}>
+          <strong>{lockedExcluded}</strong> touch{lockedExcluded === 1 ? "" : "es"} left out as circuit-locked
+          (closed at its own high, so there were no sellers to short into). Change that under{" "}
+          <strong>Filters &amp; sort → Tradeability</strong>.
+        </p>
+      )}
 
       {outcomeFilter !== "all" && (
         <p className="muted" style={{ fontSize: 12.5, margin: "-4px 0 14px" }}>
@@ -677,7 +769,7 @@ function BandStudyResult({
 
       {/* The per-touch graph — click any stock below to see it here. */}
       {selectedTouch && (
-        <TouchBarChart touch={selectedTouch} beforeOffsets={beforeOffsets} dayOffsets={dayOffsets} findDay={findDay} onClose={() => onSelectTouch(null)} />
+        <TouchBarChart touch={selectedTouch} beforeOffsets={beforeOffsets} dayOffsets={dayOffsets} findDay={findDay} metric={metric} onClose={() => onSelectTouch(null)} />
       )}
 
       {/* The report: every tracked day, up and down kept separate. Cumulative
@@ -685,7 +777,9 @@ function BandStudyResult({
           days on?" and "day -3" answers "where was it, 3 days before?" */}
       <div className="card">
         <div className="card-title">
-          Cumulative move by each tracked day (up vs down kept separate)
+          {metric === "intraday"
+            ? "Each day's own open→close move (up vs down kept separate)"
+            : "Cumulative move by each tracked day (up vs down kept separate)"}
         </div>
         <table className="table">
           <thead>
@@ -696,8 +790,8 @@ function BandStudyResult({
               <th className="num">Avg up move</th>
               <th className="num">Down</th>
               <th className="num">Avg down move</th>
-              <th className="num" title="Expected % per trade: what the whole cohort averages, in the thesis trade's favour">
-                EV
+              <th className="num" title={`Expected % per trade, after ${ROUND_TRIP_COST_PCT}% round-trip costs`}>
+                EV (net)
               </th>
             </tr>
           </thead>
@@ -723,8 +817,9 @@ function BandStudyResult({
           </tbody>
         </table>
         <p className="muted" style={{ fontSize: 12.5, margin: "10px 0 0" }}>
-          <strong>EV</strong> is what one trade averages, taken at the touch day's close. A high down-% still loses
-          money when the minority that rise, rise further — this column is the one that catches that.
+          <strong>EV (net)</strong> is what one trade averages after {ROUND_TRIP_COST_PCT}% round-trip costs
+          (brokerage, STT, stamp duty, exchange fees). A high down-% still loses money when the minority that rise,
+          rise further — this column is the one that catches that.
         </p>
       </div>
 
@@ -797,6 +892,11 @@ function BandStudyResult({
                         ⚠ possible split/bonus
                       </span>
                     )}
+                    {isCircuitLocked(t) && (
+                      <span className="tag warn" title="Closed at its own high — almost certainly locked at the upper circuit, so it could not have been shorted">
+                        circuit-locked
+                      </span>
+                    )}
                     <div className="muted" style={{ fontSize: 12 }}>{t.name}</div>
                   </td>
                   <td className="num">{t.date}</td>
@@ -806,13 +906,14 @@ function BandStudyResult({
                   {showingAll ? (
                     allOffsets.map((n) => {
                       const d = findDay(t, n);
+                      const v = d == null ? null : metric === "intraday" ? d.open_close_pct : d.pct_from_touch;
                       return (
                         <td
                           key={n}
-                          className={`num ${d ? (d.pct_from_touch >= 0 ? "pos" : "neg") : ""}`}
-                          title={d ? `${d.date} · close ${d.close}` : "no data this far out"}
+                          className={`num ${v == null ? "" : v >= 0 ? "pos" : "neg"}`}
+                          title={d ? `${d.date} · open ${d.open ?? "—"} · close ${d.close}` : "no data this far out"}
                         >
-                          {d ? pct(d.pct_from_touch) : "—"}
+                          {v != null ? pct(v) : "—"}
                         </td>
                       );
                     })
@@ -857,19 +958,20 @@ function BandStudyResult({
 
 // A neat before/touch/after bar chart for one stock's move around its spike —
 // self-contained inline SVG so it stays theme-aware with zero extra deps.
-function TouchBarChart({ touch, beforeOffsets, dayOffsets, findDay, onClose }) {
+function TouchBarChart({ touch, beforeOffsets, dayOffsets, findDay, metric, onClose }) {
   const points = useMemo(() => {
-    const before = beforeOffsets.map((n) => {
+    const move = (d) => (d == null ? null : metric === "intraday" ? d.open_close_pct : d.pct_from_touch);
+    const bar = (n, label) => {
       const d = findDay(touch, n);
-      return { offset: n, label: `D${n}`, date: d?.date ?? null, pct: d ? d.pct_from_touch : null };
-    });
+      return { offset: n, label, date: d?.date ?? null, pct: move(d) };
+    };
+    const before = beforeOffsets.map((n) => bar(n, `D${n}`));
+    // The touch bar is that session's own open->close either way — it is the
+    // spike itself, so "cumulative from the touch" would always be zero.
     const touchPoint = { offset: 0, label: "Touch", date: touch.date, pct: touch.close_pct, isTouch: true };
-    const after = dayOffsets.map((n) => {
-      const d = findDay(touch, n);
-      return { offset: n, label: `D+${n}`, date: d?.date ?? null, pct: d ? d.pct_from_touch : null };
-    });
+    const after = dayOffsets.map((n) => bar(n, `D+${n}`));
     return [...before, touchPoint, ...after];
-  }, [touch, beforeOffsets, dayOffsets, findDay]);
+  }, [touch, beforeOffsets, dayOffsets, findDay, metric]);
 
   const values = points.map((p) => p.pct).filter((v) => v != null);
   const maxAbs = Math.max(1, ...values.map((v) => Math.abs(v)));
@@ -933,8 +1035,10 @@ function TouchBarChart({ touch, beforeOffsets, dayOffsets, findDay, onClose }) {
         </svg>
       </div>
       <p className="muted" style={{ fontSize: 12, margin: "8px 0 0" }}>
-        Before/after bars are cumulative % move from the touch day's close (offset 0). The touch bar itself
-        (black) is that session's own open→close move — what the spike actually looked like.
+        {metric === "intraday"
+          ? "Before/after bars are each session's own open→close move — what an intraday trade in that session would have captured."
+          : "Before/after bars are cumulative % move from the touch day's close (offset 0)."}{" "}
+        The touch bar itself (black) is that session's own open→close move — what the spike actually looked like.
       </p>
     </div>
   );
@@ -992,9 +1096,12 @@ function FilterDrawer({
   // picked in single-day mode.
   const singleDayOffsets = Array.from({ length: Math.max(0, runBeforeDays - 1) }, (_, i) => -(i + 1));
 
+  const lockedCount = useMemo(() => rows.filter(isCircuitLocked).length, [rows]);
+
   const cats = [
     ["window", "Window", filters.viewBefore != null || filters.viewAfter != null],
     ["before", "Before-move", bm.on],
+    ["tradeable", "Tradeability", filters.tradeable !== "exclude_locked"],
     ["outcome", "Outcome", filters.outcome !== "all"],
     ["sort", "Sort by", !!sort.key],
   ];
@@ -1115,6 +1222,28 @@ function FilterDrawer({
                   Check both directions at the same threshold before trusting a result. If “fell” and “rose” give
                   roughly the same down-%, the filter is not carrying any signal — the number moved because the
                   sample got smaller, not because the rule found something.
+                </p>
+              </>
+            )}
+
+            {tab === "tradeable" && (
+              <>
+                <Radio name="tradeable" value="exclude_locked" cur={filters.tradeable}
+                  onPick={(v) => set({ tradeable: v })}
+                  label="Only touches that could be shorted" note={`${rows.length - lockedCount}`} />
+                <Radio name="tradeable" value="all" cur={filters.tradeable} onPick={(v) => set({ tradeable: v })}
+                  label="Include circuit-locked too" note={`all ${rows.length}`} />
+                <Radio name="tradeable" value="only_locked" cur={filters.tradeable} onPick={(v) => set({ tradeable: v })}
+                  label="Only circuit-locked" note={`${lockedCount}`} />
+                <p className="drawer-note">
+                  <strong>{lockedCount} of {rows.length}</strong> touch{lockedCount === 1 ? "" : "es"} in this run
+                  closed within 0.15 points of its own high. On a move this size that is almost always an
+                  upper-circuit lock — only buyers, no sellers, so there was nobody to sell to and the short could
+                  never have been opened.
+                </p>
+                <p className="drawer-note">
+                  They are excluded by default because including them measures trades that were impossible. Switch
+                  to “include” only to see how much they were flattering the numbers.
                 </p>
               </>
             )}
