@@ -42,6 +42,119 @@ function sortValue(t, key, viewDay, findDay) {
   return null;
 }
 
+// --- how the stock moved on its way INTO the touch --------------------------
+//
+// Both read off `close` on the stored before-days, so they measure ordinary
+// forward-in-time price change. Deliberately NOT pct_from_prev_day: on
+// before-days that field is computed walking BACKWARDS from the touch, so its
+// sign reads inverted for this question.
+
+// One before-day's own daily move — its close against the previous trading
+// day's close, exactly what "the stock was 6% down on Jan 4" means.
+//
+// Day -k needs the close of day -(k+1), so the furthest tracked before-day can
+// never have one. Returns null when it cannot be computed, and callers treat
+// null as "cannot judge" rather than as 0%.
+function beforeDayOwnMove(t, offset) {
+  const days = t.before_days ?? [];
+  const cur = days.find((d) => d.offset === offset);
+  const prior = days.find((d) => d.offset === offset - 1);
+  if (!cur || !prior || !prior.close) return null;
+  return ((cur.close - prior.close) / prior.close) * 100;
+}
+
+// The whole run-up: close on the furthest visible before-day against the close
+// on the day right before the touch.
+function beforeWindowMove(t, span) {
+  const days = t.before_days ?? [];
+  const near = days.find((d) => d.offset === -1);
+  const far = days.find((d) => d.offset === -Math.min(span, days.length));
+  if (!near || !far || !far.close || near.offset === far.offset) return null;
+  return ((near.close - far.close) / far.close) * 100;
+}
+
+// The move a beforeMove filter is testing, for one touch. null = unjudgeable.
+function beforeMoveValue(t, bm, span) {
+  return bm.mode === "single" ? beforeDayOwnMove(t, bm.offset) : beforeWindowMove(t, span);
+}
+
+function passesBeforeMove(t, bm, span) {
+  if (!bm.on) return true;
+  const v = beforeMoveValue(t, bm, span);
+  if (v == null) return false; // never silently counted as a 0% move
+  return bm.direction === "fell" ? v <= -bm.pct : v >= bm.pct;
+}
+
+// null on viewBefore/viewAfter means "however many the run tracked".
+const DEFAULT_FILTERS = {
+  // Pre-trade: known before the trade would have been placed, so these are
+  // allowed to drive the prediction panel.
+  viewBefore: null,
+  viewAfter: null,
+  beforeMove: {
+    on: false,
+    mode: "cumulative", // "cumulative" | "single"
+    offset: -1,         // used when mode === "single"
+    direction: "fell",  // "fell" | "rose"
+    pct: 5,             // threshold, always a positive number
+  },
+  // View-only: this is the thing being PREDICTED, so it may never feed the
+  // panel — filtering by it and then scoring it would always read 100%.
+  outcome: "all",       // "all" | "up" | "down"
+};
+
+// Cohort stats at one day-offset, over whatever set of touches is passed in.
+// Mirrors engine.backtest._summarize_one_day: a touch with no data that far out
+// is excluded from `scored` rather than counted as a flat 0% — a missing day is
+// not a zero move, and treating it as one would drag the averages toward
+// nothing.
+function summarizeOffset(touches, offset, direction = "up") {
+  const moves = [];
+  for (const t of touches) {
+    const list = offset >= 0 ? t.follow_days : t.before_days;
+    const d = (list ?? []).find((x) => x.offset === offset);
+    if (d) moves.push(d.pct_from_touch);
+  }
+  const up = moves.filter((m) => m > 0);
+  const down = moves.filter((m) => m < 0);
+  const scored = moves.length;
+  const r2 = (v) => Math.round(v * 100) / 100;
+  const avg = (xs) => (xs.length ? r2(xs.reduce((a, b) => a + b, 0) / xs.length) : null);
+  const share = (xs) => (scored ? Math.round((xs.length / scored) * 1000) / 10 : 0);
+
+  // Expected value of taking the thesis trade at the touch close, in % per
+  // trade. An "up" band study shorts the spike, so a negative move is a gain
+  // and EV is just the mean negated; a "down" study is the bounce thesis (a
+  // long), so the sign flips.
+  //
+  // This is the number a high down-% can hide: a cohort can fall 6 times out
+  // of 10 and still lose money if the 4 that rise, rise further.
+  const meanPct = scored ? moves.reduce((a, b) => a + b, 0) / scored : null;
+  const ev = meanPct == null ? null : r2(direction === "up" ? -meanPct : meanPct);
+
+  return {
+    offset,
+    scored,
+    up_count: up.length,
+    down_count: down.length,
+    flat_count: moves.filter((m) => m === 0).length,
+    up_pct: share(up),
+    down_pct: share(down),
+    avg_pct_up: avg(up),
+    avg_pct_down: avg(down),
+    ev,
+  };
+}
+
+function countActiveFilters(f, runBefore, runAfter) {
+  let n = 0;
+  if (f.beforeMove.on) n++;
+  if (f.outcome !== "all") n++;
+  if (f.viewBefore != null && f.viewBefore < runBefore) n++;
+  if (f.viewAfter != null && f.viewAfter < runAfter) n++;
+  return n;
+}
+
 export default function BacktestPage() {
   const [mode, setMode] = useState("band"); // "band" | "single"
 
@@ -89,10 +202,17 @@ function BandStudy({ singleDate }) {
   // Which day-offset the results table is showing. 0 means "all tracked days".
   const [viewDay, setViewDay] = useState(1);
   const [selectedTouch, setSelectedTouch] = useState(null);
-  // "all" | "up" | "down" — filters the touches table to only rows that rose
-  // (or fell) on the day being viewed (the touch day's own move when "All
-  // days" is selected, since there's no single day to judge by there).
-  const [outcomeFilter, setOutcomeFilter] = useState("all");
+  // Everything the drawer controls, in one object so "Clear all" is a single
+  // reset and the active-filter count is easy to derive. All of it narrows what
+  // is DISPLAYED from the scan already in memory — none of it re-scans.
+  //   outcome     — rows that rose / fell on the day being viewed (the touch
+  //                 day's own move when "All days" is selected).
+  //   trend       — was the stock climbing or sliding into the touch.
+  //   type        — how much of the intraday spike survived to the close.
+  //   viewBefore  — how many of the tracked before-days to show (null = all).
+  //   viewAfter   — same for follow-days.
+  const [filters, setFilters] = useState(DEFAULT_FILTERS);
+  const [drawerOpen, setDrawerOpen] = useState(false);
 
   const [run, setRun] = useState(null);
   const [runs, setRuns] = useState([]);
@@ -121,7 +241,19 @@ function BandStudy({ singleDate }) {
       setViewDay(1); // a freshly loaded run always starts on day 1
       setSelectedTouch(null);
       setSort({ key: null, dir: null }); // and on the table's normal (unsorted) order
-      setOutcomeFilter("all");
+      // Filters deliberately SURVIVE a run change, clamped to what the new run
+      // tracked. That turns the Past runs list into out-of-sample testing: set a
+      // rule on January, click February, and the same rule lands on data it was
+      // never tuned on. A rule that only works on the month it was found in is
+      // curve-fitting, and this is the cheapest way to catch that.
+      const nb = d.run?.before_days ?? 0;
+      const nf = d.run?.follow_days ?? 1;
+      setFilters((f) => ({
+        ...f,
+        viewBefore: f.viewBefore == null ? null : Math.min(f.viewBefore, nb),
+        viewAfter: f.viewAfter == null ? null : Math.max(1, Math.min(f.viewAfter, nf)),
+        beforeMove: { ...f.beforeMove, offset: Math.max(f.beforeMove.offset, -nb || -1) },
+      }));
     } catch (e) {
       setError(e);
     } finally {
@@ -224,15 +356,38 @@ function BandStudy({ singleDate }) {
     });
   }, [rows, sort, viewDay]);
 
-  const visibleTouches = useMemo(() => {
-    if (outcomeFilter === "all") return sortedTouches;
-    return sortedTouches.filter((t) =>
-      outcomeFilter === "up" ? t._outcome > 0 : t._outcome != null && t._outcome < 0
-    );
-  }, [sortedTouches, outcomeFilter]);
+  // How many tracked days the drawer is currently letting through. Capped by
+  // what the run actually scanned — you can narrow the view, never widen it
+  // past the data.
+  const viewBefore = Math.min(filters.viewBefore ?? runBeforeDays, runBeforeDays);
+  const viewAfter = Math.min(filters.viewAfter ?? runFollowDays, runFollowDays);
 
-  const upCount = rows.filter((t) => t._outcome > 0).length;
-  const downCount = rows.filter((t) => t._outcome != null && t._outcome < 0).length;
+  // PRE-TRADE ONLY. Everything here was knowable before the trade would have
+  // been placed, so it is legitimate to score a prediction on this set.
+  const predictionTouches = useMemo(
+    () => sortedTouches.filter((t) => passesBeforeMove(t, filters.beforeMove, viewBefore)),
+    [sortedTouches, filters.beforeMove, viewBefore]
+  );
+
+  // + the outcome filter. Rows only — never the panel, because the outcome is
+  // the thing being predicted; scoring a set selected BY that outcome would
+  // always read 100% and mean nothing.
+  const visibleTouches = useMemo(() => {
+    if (filters.outcome === "all") return predictionTouches;
+    return predictionTouches.filter((t) =>
+      filters.outcome === "up" ? t._outcome > 0 : t._outcome != null && t._outcome < 0
+    );
+  }, [predictionTouches, filters.outcome]);
+
+  const upCount = predictionTouches.filter((t) => t._outcome > 0).length;
+  const downCount = predictionTouches.filter((t) => t._outcome != null && t._outcome < 0).length;
+  const activeFilterCount = countActiveFilters(filters, runBeforeDays, runFollowDays);
+
+  // Narrowing the window can strand the selected day outside it — snap back to
+  // day +1, which every run has.
+  useEffect(() => {
+    if (viewDay > viewAfter || viewDay < -viewBefore) setViewDay(1);
+  }, [viewAfter, viewBefore, viewDay]);
 
   // Click cycle per heading: normal -> ascending -> descending -> normal again.
   function toggleSort(key) {
@@ -366,20 +521,42 @@ function BandStudy({ singleDate }) {
         <BandStudyResult
           run={run.run}
           touches={visibleTouches}
+          predictionTouches={predictionTouches}
           totalCount={touches.length}
+          outcomeFilter={filters.outcome}
+          beforeMoveOn={filters.beforeMove.on}
           onSort={toggleSort}
           sortArrow={arrow}
           viewDay={viewDay}
           onViewDay={setViewDay}
-          followDays={runFollowDays}
-          beforeDays={runBeforeDays}
+          followDays={viewAfter}
+          beforeDays={viewBefore}
           selectedTouch={selectedTouch}
           onSelectTouch={setSelectedTouch}
           findDay={findDay}
-          outcomeFilter={outcomeFilter}
-          onOutcomeFilter={setOutcomeFilter}
+          onOpenFilters={() => setDrawerOpen(true)}
+          activeFilterCount={activeFilterCount}
+        />
+      )}
+
+      {drawerOpen && (
+        <FilterDrawer
+          filters={filters}
+          onChange={setFilters}
+          onClose={() => setDrawerOpen(false)}
+          runBeforeDays={runBeforeDays}
+          runFollowDays={runFollowDays}
           upCount={upCount}
           downCount={downCount}
+          rows={rows}
+          viewBefore={viewBefore}
+          matchCount={visibleTouches.length}
+          predictionCount={predictionTouches.length}
+          totalCount={touches.length}
+          sort={sort}
+          onSort={toggleSort}
+          onClearSort={() => setSort({ key: null, dir: null })}
+          viewDay={viewDay}
         />
       )}
     </>
@@ -387,18 +564,30 @@ function BandStudy({ singleDate }) {
 }
 
 function BandStudyResult({
-  run, touches, totalCount, onSort, sortArrow, viewDay, onViewDay, followDays, beforeDays,
-  selectedTouch, onSelectTouch, findDay, outcomeFilter, onOutcomeFilter, upCount, downCount,
+  run, touches, predictionTouches, totalCount, outcomeFilter, beforeMoveOn, onSort, sortArrow,
+  viewDay, onViewDay, followDays, beforeDays,
+  selectedTouch, onSelectTouch, findDay, onOpenFilters, activeFilterCount,
 }) {
   const flaggedCount = touches.filter((t) => t.corporate_action_suspected).length;
-  const perDay = run.per_day ?? [];
-  const perBeforeDay = run.per_before_day ?? [];
   const dayOffsets = Array.from({ length: followDays }, (_, i) => i + 1);
   const beforeOffsets = Array.from({ length: beforeDays }, (_, i) => i - beforeDays); // -N ... -1
   const allOffsets = [...beforeOffsets, ...dayOffsets];
-  const allPerDay = [...perBeforeDay, ...perDay];
+
+  // Scored on predictionTouches, NOT on the rows below: those have had the
+  // outcome filter applied, and scoring a set picked by its outcome would just
+  // report that outcome back at 100%. Recomputed rather than read off the run
+  // because the pre-trade filters are the whole point — "of the stocks that
+  // were sliding into the touch, how many fell afterwards?" is a different
+  // question from "of all touches...".
+  const allPerDay = useMemo(
+    () => allOffsets.map((offset) => summarizeOffset(predictionTouches, offset, run.direction)),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [predictionTouches, followDays, beforeDays, run.direction]
+  );
   const selected = allPerDay.find((d) => d.offset === viewDay) ?? null;
   const showingAll = viewDay === 0;
+  // "All days" has no single day to score, so the panel falls back to day +1.
+  const panel = showingAll ? allPerDay.find((d) => d.offset === 1) ?? null : selected;
   const dayLabel = (n) => (n > 0 ? `Day +${n}` : `Day ${n}`);
 
   return (
@@ -440,24 +629,51 @@ function BandStudyResult({
         </div>
       </div>
 
-      {/* Headline counts, for whichever day is selected */}
+      {/* THE PREDICTION PANEL. Always scored on predictionTouches, so it stays
+          an honest read no matter what the outcome filter is doing below. */}
       <div className="summary-row">
-        <Stat label="Total touches" value={run.total_touches} />
         <Stat
-          label={showingAll ? "Scored on day 1" : `Scored on ${dayLabel(viewDay)}`}
-          value={showingAll ? (perDay[0]?.scored ?? 0) : (selected?.scored ?? 0)}
+          label={predictionTouches.length === totalCount ? "Total touches" : "Touches (filtered)"}
+          value={predictionTouches.length}
         />
         <Stat
-          label={showingAll ? "Up by day 1" : `Up by ${dayLabel(viewDay)}`}
-          value={`${(showingAll ? perDay[0]?.up_pct : selected?.up_pct) ?? 0}%`}
+          label={showingAll ? "Scored on day +1" : `Scored on ${dayLabel(viewDay)}`}
+          value={panel?.scored ?? 0}
+        />
+        <Stat
+          label={showingAll ? "Up by day +1" : `Up by ${dayLabel(viewDay)}`}
+          value={`${panel?.up_pct ?? 0}%`}
           cls="pos"
         />
         <Stat
-          label={showingAll ? "Down by day 1" : `Down by ${dayLabel(viewDay)}`}
-          value={`${(showingAll ? perDay[0]?.down_pct : selected?.down_pct) ?? 0}%`}
+          label={showingAll ? "Down by day +1" : `Down by ${dayLabel(viewDay)}`}
+          value={`${panel?.down_pct ?? 0}%`}
           cls="neg"
         />
+        <Stat
+          label="Avg down / up"
+          value={
+            <>
+              <span className="neg">{panel?.avg_pct_down != null ? pct(panel.avg_pct_down) : "—"}</span>
+              <span className="muted"> / </span>
+              <span className="pos">{panel?.avg_pct_up != null ? pct(panel.avg_pct_up) : "—"}</span>
+            </>
+          }
+        />
+        <Stat
+          label="EV per trade"
+          value={panel?.ev != null ? pct(panel.ev) : "—"}
+          cls={panel?.ev == null ? "" : panel.ev > 0 ? "pos" : "neg"}
+        />
       </div>
+
+      {outcomeFilter !== "all" && (
+        <p className="muted" style={{ fontSize: 12.5, margin: "-4px 0 14px" }}>
+          The rows below are filtered to the {outcomeFilter === "up" ? "risers" : "fallers"} ({touches.length} of{" "}
+          {predictionTouches.length}), but the panel above still scores all {predictionTouches.length} — filtering by
+          the outcome and then scoring it would just read 100% and predict nothing.
+        </p>
+      )}
 
       {/* The per-touch graph — click any stock below to see it here. */}
       {selectedTouch && (
@@ -480,6 +696,9 @@ function BandStudyResult({
               <th className="num">Avg up move</th>
               <th className="num">Down</th>
               <th className="num">Avg down move</th>
+              <th className="num" title="Expected % per trade: what the whole cohort averages, in the thesis trade's favour">
+                EV
+              </th>
             </tr>
           </thead>
           <tbody>
@@ -496,32 +715,46 @@ function BandStudyResult({
                 <td className="num pos">{d.avg_pct_up != null ? pct(d.avg_pct_up) : "—"}</td>
                 <td className="num">{d.down_count} <span className="muted">({d.down_pct}%)</span></td>
                 <td className="num neg">{d.avg_pct_down != null ? pct(d.avg_pct_down) : "—"}</td>
+                <td className={`num ${d.ev == null ? "" : d.ev > 0 ? "pos" : "neg"}`}>
+                  {d.ev != null ? pct(d.ev) : "—"}
+                </td>
               </tr>
             ))}
           </tbody>
         </table>
+        <p className="muted" style={{ fontSize: 12.5, margin: "10px 0 0" }}>
+          <strong>EV</strong> is what one trade averages, taken at the touch day's close. A high down-% still loses
+          money when the minority that rise, rise further — this column is the one that catches that.
+        </p>
       </div>
 
       {/* Every touch, shown separately */}
       <section className="card">
         <div className="card-title">
-          {run.start_date === run.end_date ? run.start_date : `${run.start_date} → ${run.end_date}`} — every{" "}
-          {run.direction === "up" ? "spike" : "drop"} that touched {run.band_low}–{run.band_high}%
-        </div>
-        <div className="seg" style={{ marginBottom: 12 }}>
-          <button type="button" className={outcomeFilter === "all" ? "on" : ""} onClick={() => onOutcomeFilter("all")}>
-            All {totalCount}
-          </button>
-          <button type="button" className={outcomeFilter === "up" ? "on" : ""} onClick={() => onOutcomeFilter("up")}>
-            Up only ({upCount})
-          </button>
-          <button type="button" className={outcomeFilter === "down" ? "on" : ""} onClick={() => onOutcomeFilter("down")}>
-            Down only ({downCount})
+          <span>
+            {run.start_date === run.end_date ? run.start_date : `${run.start_date} → ${run.end_date}`} — every{" "}
+            {run.direction === "up" ? "spike" : "drop"} that touched {run.band_low}–{run.band_high}%
+          </span>
+          <button type="button" className="small" onClick={onOpenFilters}>
+            Filters &amp; sort
+            {activeFilterCount > 0 && <span className="filter-badge">{activeFilterCount}</span>}
           </button>
         </div>
+        <p className="muted" style={{ fontSize: 12.5, margin: "0 0 12px" }}>
+          Showing <strong>{touches.length}</strong> of {totalCount} touches
+          {activeFilterCount > 0 ? ` (${activeFilterCount} filter${activeFilterCount === 1 ? "" : "s"} on)` : ""}.
+        </p>
         {touches.length === 0 && (
           <p className="muted" style={{ margin: "0 0 12px" }}>
-            No touches {outcomeFilter === "up" ? "rose" : "fell"} on {showingAll ? "the touch day" : dayLabel(viewDay)} — try the other filter.
+            {beforeDays === 0 && beforeMoveOn ? (
+              <>
+                The <strong>Before-move</strong> filter is on, but this run tracked no days before each touch, so
+                there is nothing for it to measure. Clear the filter, or re-scan this range with a before-days
+                window.
+              </>
+            ) : (
+              <>No touches match these filters — open <strong>Filters &amp; sort</strong> and widen or clear them.</>
+            )}
           </p>
         )}
         <table className="table screener-table">
@@ -713,5 +946,250 @@ function Stat({ label, value, cls = "" }) {
       <div className="stat-label">{label}</div>
       <div className={`stat-value ${cls}`}>{value}</div>
     </div>
+  );
+}
+
+// =============================================================================
+// FILTER DRAWER — narrows what's DISPLAYED from the scan already in memory.
+// Nothing here re-scans, so every change is instant; the trade-off is that you
+// can only ever narrow the tracked window, never widen it past what the run
+// actually fetched.
+// =============================================================================
+function FilterDrawer({
+  filters, onChange, onClose, runBeforeDays, runFollowDays,
+  upCount, downCount, rows, viewBefore, matchCount, predictionCount, totalCount,
+  sort, onSort, onClearSort, viewDay,
+}) {
+  const [tab, setTab] = useState("window");
+  const set = (patch) => onChange({ ...filters, ...patch });
+  const setBM = (patch) => onChange({ ...filters, beforeMove: { ...filters.beforeMove, ...patch } });
+  const bm = filters.beforeMove;
+
+  // Live preview of what the current before-move settings would keep, plus how
+  // many touches simply cannot be judged (no close on the day it needs).
+  const bmCounts = useMemo(() => {
+    let fell = 0, rose = 0, unknown = 0;
+    for (const t of rows) {
+      const v = beforeMoveValue(t, bm, viewBefore);
+      if (v == null) unknown += 1;
+      else if (v <= -bm.pct) fell += 1;
+      else if (v >= bm.pct) rose += 1;
+    }
+    return { fell, rose, unknown };
+  }, [rows, bm.mode, bm.offset, bm.pct, viewBefore]);
+
+  const dayLabel = (n) => (n > 0 ? `Day +${n}` : `Day ${n}`);
+  const sortCols = [
+    ["symbol", "Symbol"],
+    ["date", "Touch date"],
+    ["touch_pct", "Touch %"],
+    ["close_pct", "Close %"],
+    ["_pct", `${viewDay === 0 ? "Viewed day" : dayLabel(viewDay)} change`],
+    ["_open_close", "Open→close"],
+  ];
+
+  // Day -1 needs day -2's close, so the furthest tracked day can never be
+  // picked in single-day mode.
+  const singleDayOffsets = Array.from({ length: Math.max(0, runBeforeDays - 1) }, (_, i) => -(i + 1));
+
+  const cats = [
+    ["window", "Window", filters.viewBefore != null || filters.viewAfter != null],
+    ["before", "Before-move", bm.on],
+    ["outcome", "Outcome", filters.outcome !== "all"],
+    ["sort", "Sort by", !!sort.key],
+  ];
+
+  return (
+    <div className="drawer-backdrop" onClick={onClose}>
+      <div className="drawer" onClick={(e) => e.stopPropagation()}>
+        <div className="drawer-head">
+          <h2>Filters &amp; sort</h2>
+          <button type="button" className="drawer-close" onClick={onClose} aria-label="Close">✕</button>
+        </div>
+
+        <div className="drawer-body">
+          <div className="drawer-rail">
+            {cats.map(([id, label, on]) => (
+              <button key={id} type="button" className={tab === id ? "on" : ""} onClick={() => setTab(id)}>
+                {label}
+                {on && <span className="rail-count"> •</span>}
+              </button>
+            ))}
+          </div>
+
+          <div className="drawer-pane">
+            {tab === "window" && (
+              <>
+                <label>
+                  Before days to show
+                  <input
+                    type="number" min="0" max={runBeforeDays} value={filters.viewBefore ?? runBeforeDays}
+                    onChange={(e) => set({ viewBefore: Math.min(Number(e.target.value), runBeforeDays) })}
+                    disabled={runBeforeDays === 0}
+                  />
+                </label>
+                <label style={{ marginTop: 14 }}>
+                  Follow-up days to show
+                  <input
+                    type="number" min="1" max={runFollowDays} value={filters.viewAfter ?? runFollowDays}
+                    onChange={(e) => set({ viewAfter: Math.max(1, Math.min(Number(e.target.value), runFollowDays)) })}
+                  />
+                </label>
+                <p className="drawer-note">
+                  This run tracked <strong>{runBeforeDays}</strong> day{runBeforeDays === 1 ? "" : "s"} before and{" "}
+                  <strong>{runFollowDays}</strong> after each touch. Narrowing here changes the day buttons, the
+                  summary table, the per-day columns and the bar chart together — instantly, with no re-scan. To go
+                  wider than the numbers above you have to run the scan again.
+                </p>
+              </>
+            )}
+
+            {tab === "before" && (
+              <>
+                {runBeforeDays === 0 && (
+                  <div className="inline-error" style={{ marginTop: 0, marginBottom: 12 }}>
+                    This run tracked no days before each touch, so there is nothing to measure. Re-scan the range
+                    with a before-days window to use this filter.
+                  </div>
+                )}
+                <Radio name="bmon" value={false} cur={bm.on} onPick={() => setBM({ on: false })}
+                  label="None" note={`all ${rows.length}`} />
+                <Radio name="bmon" value={true} cur={bm.on} onPick={() => setBM({ on: true })}
+                  label="Filter by the move before the touch"
+                  note={`${bm.direction === "fell" ? bmCounts.fell : bmCounts.rose} match`} />
+
+                <div style={{ opacity: bm.on ? 1 : 0.45, pointerEvents: bm.on ? "auto" : "none", marginTop: 14 }}>
+                  <div className="seg" style={{ marginBottom: 12 }}>
+                    <button type="button" className={bm.mode === "cumulative" ? "on" : ""}
+                      onClick={() => setBM({ mode: "cumulative" })}>
+                      Whole window
+                    </button>
+                    <button type="button" className={bm.mode === "single" ? "on" : ""}
+                      onClick={() => setBM({ mode: "single" })} disabled={singleDayOffsets.length === 0}>
+                      One day
+                    </button>
+                  </div>
+
+                  <div className="row">
+                    {bm.mode === "single" && (
+                      <label>
+                        Which day
+                        <select value={bm.offset} onChange={(e) => setBM({ offset: Number(e.target.value) })}>
+                          {singleDayOffsets.map((o) => (
+                            <option key={o} value={o}>{dayLabel(o)}</option>
+                          ))}
+                        </select>
+                      </label>
+                    )}
+                    <label>
+                      Direction
+                      <select value={bm.direction} onChange={(e) => setBM({ direction: e.target.value })}>
+                        <option value="fell">Fell at least</option>
+                        <option value="rose">Rose at least</option>
+                      </select>
+                    </label>
+                    <label>
+                      Threshold %
+                      <input type="number" min="0" step="0.5" value={bm.pct}
+                        onChange={(e) => setBM({ pct: Math.max(0, Number(e.target.value)) })} />
+                    </label>
+                  </div>
+                </div>
+
+                <p className="drawer-note">
+                  {bm.mode === "cumulative" ? (
+                    <>Measures the whole run-in: the close {viewBefore} trading day{viewBefore === 1 ? "" : "s"} before
+                    the touch against the close on the day right before it.</>
+                  ) : (
+                    <>Measures that one session's own change — its close against the previous trading day's close,
+                    which is what "it was 6% down on Jan 4" normally means.</>
+                  )}{" "}
+                  Right now <strong>{bmCounts.fell}</strong> touch{bmCounts.fell === 1 ? "" : "es"} fell ≥ {bm.pct}%
+                  and <strong>{bmCounts.rose}</strong> rose ≥ {bm.pct}%.
+                  {bmCounts.unknown > 0 && (
+                    <> {bmCounts.unknown} cannot be measured this way (no close on the day it needs) and are excluded
+                    while this filter is on — never counted as a 0% move.</>
+                  )}
+                </p>
+                <p className="drawer-note">
+                  Check both directions at the same threshold before trusting a result. If “fell” and “rose” give
+                  roughly the same down-%, the filter is not carrying any signal — the number moved because the
+                  sample got smaller, not because the rule found something.
+                </p>
+              </>
+            )}
+
+            {tab === "outcome" && (
+              <>
+                <Radio name="outcome" value="all" cur={filters.outcome} onPick={(v) => set({ outcome: v })}
+                  label="None" note={`all ${predictionCount}`} />
+                <Radio name="outcome" value="up" cur={filters.outcome} onPick={(v) => set({ outcome: v })}
+                  label="Rose only" note={`${upCount}`} />
+                <Radio name="outcome" value="down" cur={filters.outcome} onPick={(v) => set({ outcome: v })}
+                  label="Fell only" note={`${downCount}`} />
+                <p className="drawer-note">
+                  Judged on the day currently selected ({viewDay === 0 ? "the touch day's own move, since all days are shown" : dayLabel(viewDay)}),
+                  so these counts change as you switch days.
+                </p>
+                <p className="drawer-note">
+                  <strong>This one only hides table rows — it never touches the panel above.</strong> The panel is
+                  measuring how often the prediction came true, and picking the rows by that same outcome would just
+                  report it back as 100%. Use this to read through the fallers, not to score them.
+                </p>
+              </>
+            )}
+
+            {tab === "sort" && (
+              <>
+                <Radio name="sortcol" value="" cur={sort.key ?? ""} onPick={() => onClearSort()}
+                  label="Normal (scan order)" />
+                {sortCols.map(([key, label]) => (
+                  // onClick lives on the input, not the label: a label wrapping
+                  // an input forwards clicks to it, so a handler on both would
+                  // advance the sort cycle twice per click. onClick (not
+                  // onChange) so re-picking the current column still cycles it.
+                  <label key={key} className="opt">
+                    <input type="radio" name="sortcol" readOnly checked={sort.key === key}
+                      onClick={() => onSort(key)} />
+                    <span>
+                      {label}
+                      {sort.key === key && (
+                        <span className="opt-note"> — {sort.dir === "asc" ? "ascending ↑" : "descending ↓"}</span>
+                      )}
+                    </span>
+                  </label>
+                ))}
+                <p className="drawer-note">
+                  Same as clicking a column heading in the table: pick once for ascending, again for descending, a
+                  third time to go back to the scan's own order.
+                </p>
+              </>
+            )}
+          </div>
+        </div>
+
+        <div className="drawer-foot">
+          <button type="button" className="ghost" onClick={() => onChange(DEFAULT_FILTERS)}>
+            Clear all
+          </button>
+          <button type="button" className="primary" onClick={onClose}>
+            Show {matchCount} of {totalCount}
+            {filters.outcome !== "all" && ` · scoring ${predictionCount}`}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function Radio({ name, value, cur, onPick, label, note }) {
+  return (
+    <label className="opt">
+      <input type="radio" name={name} checked={cur === value} onChange={() => onPick(value)} />
+      <span>
+        {label}
+        {note != null && <span className="opt-note"> — {note}</span>}
+      </span>
+    </label>
   );
 }
