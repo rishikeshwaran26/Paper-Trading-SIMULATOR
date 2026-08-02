@@ -129,7 +129,18 @@ const DEFAULT_FILTERS = {
   // Pre-trade: cap bucket is visible before placing the trade.
   // Multi-select: ["all"] means no filter; any specific buckets narrow to those.
   cap: ["all"],         // ["all"] | subset of ["large","mid","small","unknown"]
+  // Pre-trade: which weekday the touch itself landed on. Multi-select, same
+  // shape as cap: ["all"] means no filter. Values are JS getUTCDay() numbers
+  // (1=Mon..5=Fri) as strings, since touch dates never fall on a weekend.
+  dow: ["all"],
 };
+
+// t.date is "YYYY-MM-DD". Parsed as UTC midnight by the Date constructor, so
+// getUTCDay() (not getDay()) is the one that matches the calendar date
+// regardless of the browser's local timezone.
+function touchDow(t) {
+  return String(new Date(t.date).getUTCDay());
+}
 
 // Cohort stats at one day-offset, over whatever set of touches is passed in.
 // Mirrors engine.backtest._summarize_one_day: a touch with no data that far out
@@ -198,6 +209,7 @@ function countActiveFilters(f, runBefore, runAfter) {
   if (f.tradeable !== "exclude_locked") n++; // the default is itself a filter
   if (f.outcome !== "all") n++;
   if (!f.cap.includes("all")) n++;
+  if (!f.dow.includes("all")) n++;
   if (f.viewBefore != null && f.viewBefore < runBefore) n++;
   if (f.viewAfter != null && f.viewAfter < runAfter) n++;
   return n;
@@ -436,9 +448,10 @@ function BandStudy({ singleDate }) {
         const bucket = caps[t.symbol] ?? "unknown";
         if (!filters.cap.includes(bucket)) return false;
       }
+      if (!filters.dow.includes("all") && !filters.dow.includes(touchDow(t))) return false;
       return passesBeforeMove(t, filters.beforeMove, viewBefore);
     }),
-    [sortedTouches, filters.beforeMove, filters.tradeable, filters.cap, caps, viewBefore]
+    [sortedTouches, filters.beforeMove, filters.tradeable, filters.cap, filters.dow, caps, viewBefore]
   );
 
   // + the outcome filter. Rows only — never the panel, because the outcome is
@@ -640,6 +653,7 @@ function BandStudy({ singleDate }) {
           findDay={findDay}
           onOpenFilters={() => setDrawerOpen(true)}
           activeFilterCount={activeFilterCount}
+          caps={caps}
         />
       )}
 
@@ -671,7 +685,7 @@ function BandStudy({ singleDate }) {
 function BandStudyResult({
   run, touches, predictionTouches, totalCount, outcomeFilter, beforeMoveOn, lockedExcluded, metric, onMetric,
   onSort, sortArrow, viewDay, onViewDay, followDays, beforeDays,
-  selectedTouch, onSelectTouch, findDay, onOpenFilters, activeFilterCount,
+  selectedTouch, onSelectTouch, findDay, onOpenFilters, activeFilterCount, caps,
 }) {
   const flaggedCount = touches.filter((t) => t.corporate_action_suspected).length;
   const dayOffsets = Array.from({ length: followDays }, (_, i) => i + 1);
@@ -1157,6 +1171,7 @@ function FilterDrawer({
     ["before", "Before-move", bm.on],
     ["tradeable", "Circuit freeze", filters.tradeable !== "exclude_locked"],
     ["cap", "Market cap", !filters.cap.includes("all")],
+    ["dow", "Day of week", !filters.dow.includes("all")],
     ["outcome", "Outcome", filters.outcome !== "all"],
     ["sort", "Sort by", !!sort.key],
   ];
@@ -1349,6 +1364,47 @@ function FilterDrawer({
                     Buckets use SEBI thresholds: large ≥ ₹20,000 cr, mid ₹5,000–20,000 cr, small below ₹5,000 cr.
                     Caps are fetched from Yahoo Finance for touched symbols only and cached for 7 days.
                     Multi-select — pick any combination.
+                  </p>
+                </>
+              );
+            })()}
+
+            {tab === "dow" && (() => {
+              const DOW_OPTS = [
+                { key: "1", label: "Mon" },
+                { key: "2", label: "Tue" },
+                { key: "3", label: "Wed" },
+                { key: "4", label: "Thu" },
+                { key: "5", label: "Fri" },
+              ];
+              const countFor = (k) => rows.filter((t) => touchDow(t) === k).length;
+              const isAll = filters.dow.includes("all");
+              const toggleDow = (k) => {
+                if (k === "all") { set({ dow: ["all"] }); return; }
+                const cur = filters.dow.filter((x) => x !== "all");
+                const next = cur.includes(k) ? cur.filter((x) => x !== k) : [...cur, k];
+                set({ dow: next.length ? next : ["all"] });
+              };
+              return (
+                <>
+                  <div className="chip-row">
+                    <button type="button" className={`chip${isAll ? " on" : ""}`} onClick={() => toggleDow("all")}>
+                      All <span className="chip-note">{rows.length}</span>
+                    </button>
+                    {DOW_OPTS.map(({ key, label }) => (
+                      <button
+                        key={key}
+                        type="button"
+                        className={`chip${!isAll && filters.dow.includes(key) ? " on" : ""}`}
+                        onClick={() => toggleDow(key)}
+                      >
+                        {label} <span className="chip-note">{countFor(key)}</span>
+                      </button>
+                    ))}
+                  </div>
+                  <p className="drawer-note">
+                    Filters to touches whose spike happened on the picked weekday(s). Multi-select — pick any
+                    combination.
                   </p>
                 </>
               );

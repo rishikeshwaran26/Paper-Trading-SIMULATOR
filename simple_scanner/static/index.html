@@ -204,6 +204,18 @@
     </p>
   </div>
 
+  <div style="margin-top:12px;display:none" id="dowFilterWrap">
+    <label>Day of week</label>
+    <div class="cap-filter" id="dowFilter">
+      <label class="cap-chip on" data-dow="all"><input type="checkbox" checked> All</label>
+      <label class="cap-chip" data-dow="1"><input type="checkbox"> Mon</label>
+      <label class="cap-chip" data-dow="2"><input type="checkbox"> Tue</label>
+      <label class="cap-chip" data-dow="3"><input type="checkbox"> Wed</label>
+      <label class="cap-chip" data-dow="4"><input type="checkbox"> Thu</label>
+      <label class="cap-chip" data-dow="5"><input type="checkbox"> Fri</label>
+    </div>
+  </div>
+
   <div class="lists" id="lists" style="display:none">
     <div>
       <div class="list-title up">Touched up</div>
@@ -308,6 +320,7 @@
 
   const capGroup = makeChipGroup("capFilter", "cap");
   const freezeGroup = makeChipGroup("freezeFilter", "freeze");
+  const dowGroup = makeChipGroup("dowFilter", "dow");
 
   function filterByCap(hits) {
     return hits.filter((h) => capGroup.matches(h.cap));
@@ -317,12 +330,19 @@
     return hits.filter((h) => freezeGroup.matches(h.frozen ? "frozen" : "not_frozen"));
   }
 
+  // JS getDay(): 0=Sun..6=Sat. new Date("YYYY-MM-DD") parses as UTC midnight,
+  // so getUTCDay() (not getDay()) is the one that matches the calendar date
+  // regardless of the browser's local timezone.
+  function filterByDow(hits) {
+    return hits.filter((h) => dowGroup.matches(String(new Date(h.date).getUTCDay())));
+  }
+
   // Re-applies the current sort + filter controls to both lists, without
   // touching the server — called on every scan result and every control change.
   function refreshLists() {
     const sortBy = $("sortBy").value;
     const text = $("filterText").value;
-    const prep = (hits, dir) => sortHits(filterByFreeze(filterByCap(filterHits(hits, text))), sortBy, dir);
+    const prep = (hits, dir) => sortHits(filterByDow(filterByFreeze(filterByCap(filterHits(hits, text)))), sortBy, dir);
     renderHits("upList", prep(lastUp, "up"), "up");
     renderHits("downList", prep(lastDown, "down"), "down");
   }
@@ -396,6 +416,7 @@
     $("controls").style.display = "none";
     $("capFilterWrap").style.display = "none";
     $("freezeFilterWrap").style.display = "none";
+    $("dowFilterWrap").style.display = "none";
     $("meta").textContent = "";
 
     const payload = {
@@ -431,11 +452,13 @@
       $("sortBy").value = "pct";
       $("filterText").value = "";
       capGroup.reset();
-      freezeGroup.reset(); // also calls refreshLists()
+      freezeGroup.reset();
+      dowGroup.reset(); // also calls refreshLists()
       $("lists").style.display = "flex";
       $("controls").style.display = "flex";
       $("capFilterWrap").style.display = "block";
       $("freezeFilterWrap").style.display = "block";
+      $("dowFilterWrap").style.display = "block";
     } catch (e) {
       $("err").textContent = e.message;
       $("err").style.display = "block";
