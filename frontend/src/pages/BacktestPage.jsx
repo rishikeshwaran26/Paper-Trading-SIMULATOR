@@ -27,6 +27,13 @@ function todayMinusDays(days) {
   return d.toISOString().slice(0, 10);
 }
 
+// A "single %" run is stored as band_high=100 (the API's own ceiling, used as
+// "no practical upper limit"). Rendered as "20%+" rather than "20-100%" so it
+// reads the way it was actually configured.
+function bandLabel(low, high) {
+  return high >= 100 ? `${low}%+` : `${low}–${high}%`;
+}
+
 // Resolves any sortable column's value for one touch. `offset:<n>` keys cover
 // the per-day columns shown in the "all days" table view; the rest cover the
 // fixed columns shown in the single-day view.
@@ -119,6 +126,9 @@ const DEFAULT_FILTERS = {
   // View-only: this is the thing being PREDICTED, so it may never feed the
   // panel — filtering by it and then scoring it would always read 100%.
   outcome: "all",       // "all" | "up" | "down"
+  // Pre-trade: cap bucket is visible before placing the trade.
+  // Multi-select: ["all"] means no filter; any specific buckets narrow to those.
+  cap: ["all"],         // ["all"] | subset of ["large","mid","small","unknown"]
 };
 
 // Cohort stats at one day-offset, over whatever set of touches is passed in.
@@ -187,6 +197,7 @@ function countActiveFilters(f, runBefore, runAfter) {
   if (f.beforeMove.on) n++;
   if (f.tradeable !== "exclude_locked") n++; // the default is itself a filter
   if (f.outcome !== "all") n++;
+  if (!f.cap.includes("all")) n++;
   if (f.viewBefore != null && f.viewBefore < runBefore) n++;
   if (f.viewAfter != null && f.viewAfter < runAfter) n++;
   return n;
@@ -231,8 +242,15 @@ function BandStudy({ singleDate }) {
   const [startDate, setStartDate] = useState(singleDate ? todayMinusDays(30) : "2026-01-01");
   const [endDate, setEndDate] = useState("2026-01-31");
   const [direction, setDirection] = useState("up");
+  // "range" — a tight band (e.g. 19-20%), the original mode.
+  // "single" — one threshold, no upper cap: "touched at least 20%", counting
+  // anything at or above it. Sent to the backend as band_low=threshold,
+  // band_high=100 (the API's own max), which is "no practical ceiling" for
+  // real single-day moves.
+  const [bandMode, setBandMode] = useState("range");
   const [bandLow, setBandLow] = useState(19);
   const [bandHigh, setBandHigh] = useState(20);
+  const [threshold, setThreshold] = useState(20);
   const [source, setSource] = useState("bhavcopy");
   const [followDays, setFollowDays] = useState(singleDate ? 10 : 5);
   const [beforeDays, setBeforeDays] = useState(singleDate ? 5 : 0);
@@ -256,6 +274,7 @@ function BandStudy({ singleDate }) {
 
   const [run, setRun] = useState(null);
   const [runs, setRuns] = useState([]);
+  const [caps, setCaps] = useState({});   // symbol -> "large"|"mid"|"small"|"unknown"
   const [status, setStatus] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -275,6 +294,7 @@ function BandStudy({ singleDate }) {
 
   async function loadRun(id) {
     setLoading(true);
+    setCaps({});
     try {
       const d = await api.getBandStudyRun(id);
       setRun(d);
@@ -294,6 +314,9 @@ function BandStudy({ singleDate }) {
         viewAfter: f.viewAfter == null ? null : Math.max(1, Math.min(f.viewAfter, nf)),
         beforeMove: { ...f.beforeMove, offset: Math.max(f.beforeMove.offset, -nb || -1) },
       }));
+      // Caps are fetched separately so the run loads instantly and badges arrive
+      // a moment later (first call fetches from Yahoo, subsequent from cache).
+      api.getBandStudyRunCaps(id).then((c) => setCaps(c.caps ?? {})).catch(() => {});
     } catch (e) {
       setError(e);
     } finally {
@@ -341,8 +364,8 @@ function BandStudy({ singleDate }) {
         start_date: startDate,
         end_date: singleDate ? startDate : endDate,
         direction,
-        band_low: Number(bandLow),
-        band_high: Number(bandHigh),
+        band_low: bandMode === "single" ? Number(threshold) : Number(bandLow),
+        band_high: bandMode === "single" ? 100 : Number(bandHigh),
         source,
         follow_days: Number(followDays),
         before_days: Number(beforeDays),
@@ -409,9 +432,13 @@ function BandStudy({ singleDate }) {
     () => sortedTouches.filter((t) => {
       if (filters.tradeable === "exclude_locked" && isCircuitLocked(t)) return false;
       if (filters.tradeable === "only_locked" && !isCircuitLocked(t)) return false;
+      if (!filters.cap.includes("all")) {
+        const bucket = caps[t.symbol] ?? "unknown";
+        if (!filters.cap.includes(bucket)) return false;
+      }
       return passesBeforeMove(t, filters.beforeMove, viewBefore);
     }),
-    [sortedTouches, filters.beforeMove, filters.tradeable, viewBefore]
+    [sortedTouches, filters.beforeMove, filters.tradeable, filters.cap, caps, viewBefore]
   );
 
   // + the outcome filter. Rows only — never the panel, because the outcome is
@@ -456,6 +483,19 @@ function BandStudy({ singleDate }) {
     <>
       <form className="card" onSubmit={runStudy}>
         <div className="card-title">{singleDate ? "Check a single date" : "Run a band study"}</div>
+        <div className="seg" style={{ marginBottom: 12 }}>
+          <button type="button" className={bandMode === "range" ? "on" : ""} onClick={() => setBandMode("range")}>
+            Band range
+          </button>
+          <button type="button" className={bandMode === "single" ? "on" : ""} onClick={() => setBandMode("single")}>
+            Single %
+          </button>
+        </div>
+        {bandMode === "single" && (
+          <p className="muted" style={{ fontSize: 12, margin: "-6px 0 12px" }}>
+            No upper limit — counts anything at or above this move, either direction.
+          </p>
+        )}
         <div className="row">
           {singleDate ? (
             <label>Date to check
@@ -477,12 +517,20 @@ function BandStudy({ singleDate }) {
               <option value="down">Drops down (bounce thesis)</option>
             </select>
           </label>
-          <label>Band low (%)
-            <input type="number" min="1" max="99" value={bandLow} onChange={(e) => setBandLow(e.target.value)} />
-          </label>
-          <label>Band high (%)
-            <input type="number" min="1" max="100" value={bandHigh} onChange={(e) => setBandHigh(e.target.value)} />
-          </label>
+          {bandMode === "single" ? (
+            <label>Touched at least (%)
+              <input type="number" min="1" max="99" value={threshold} onChange={(e) => setThreshold(e.target.value)} />
+            </label>
+          ) : (
+            <>
+              <label>Band low (%)
+                <input type="number" min="1" max="99" value={bandLow} onChange={(e) => setBandLow(e.target.value)} />
+              </label>
+              <label>Band high (%)
+                <input type="number" min="1" max="100" value={bandHigh} onChange={(e) => setBandHigh(e.target.value)} />
+              </label>
+            </>
+          )}
           <label>Before days
             <input type="number" min="0" max="30" value={beforeDays}
               onChange={(e) => setBeforeDays(e.target.value)} />
@@ -547,7 +595,7 @@ function BandStudy({ singleDate }) {
                   title={r.status}
                 >
                   {r.start_date === r.end_date ? r.start_date : `${r.start_date} → ${r.end_date}`}
-                  {" "}({r.band_low}–{r.band_high}%, {r.source})
+                  {" "}({bandLabel(r.band_low, r.band_high)}, {r.source})
                   {r.status === "done" ? ` · ${r.total_touches} touches` : ` (${r.status})`}
                 </button>
               ))}
@@ -565,7 +613,7 @@ function BandStudy({ singleDate }) {
       {run && run.run.status === "done" && touches.length === 0 && (
         <div className="card">
           <p className="muted" style={{ margin: 0 }}>
-            No stock touched {run.run.band_low}–{run.run.band_high}% in this range — try a wider band or a longer range.
+            No stock touched {bandLabel(run.run.band_low, run.run.band_high)} in this range — try a wider band or a longer range.
           </p>
         </div>
       )}
@@ -605,6 +653,7 @@ function BandStudy({ singleDate }) {
           upCount={upCount}
           downCount={downCount}
           rows={rows}
+          caps={caps}
           viewBefore={viewBefore}
           matchCount={visibleTouches.length}
           predictionCount={predictionTouches.length}
@@ -753,9 +802,9 @@ function BandStudyResult({
 
       {lockedExcluded > 0 && (
         <p className="muted" style={{ fontSize: 12.5, margin: "-4px 0 14px" }}>
-          <strong>{lockedExcluded}</strong> touch{lockedExcluded === 1 ? "" : "es"} left out as circuit-locked
+          <strong>{lockedExcluded}</strong> touch{lockedExcluded === 1 ? "" : "es"} left out as frozen
           (closed at its own high, so there were no sellers to short into). Change that under{" "}
-          <strong>Filters &amp; sort → Tradeability</strong>.
+          <strong>Filters &amp; sort → Circuit freeze</strong>.
         </p>
       )}
 
@@ -828,7 +877,7 @@ function BandStudyResult({
         <div className="card-title">
           <span>
             {run.start_date === run.end_date ? run.start_date : `${run.start_date} → ${run.end_date}`} — every{" "}
-            {run.direction === "up" ? "spike" : "drop"} that touched {run.band_low}–{run.band_high}%
+            {run.direction === "up" ? "spike" : "drop"} that touched {bandLabel(run.band_low, run.band_high)}
           </span>
           <button type="button" className="small" onClick={onOpenFilters}>
             Filters &amp; sort
@@ -893,8 +942,13 @@ function BandStudyResult({
                       </span>
                     )}
                     {isCircuitLocked(t) && (
-                      <span className="tag warn" title="Closed at its own high — almost certainly locked at the upper circuit, so it could not have been shorted">
-                        circuit-locked
+                      <span className="tag warn" title="Closed at its own high — almost certainly frozen at the upper circuit, so it could not have been shorted">
+                        frozen
+                      </span>
+                    )}
+                    {caps[t.symbol] && caps[t.symbol] !== "unknown" && (
+                      <span className={`tag cap-${caps[t.symbol]}`} title={`${caps[t.symbol]} cap`}>
+                        {caps[t.symbol]}
                       </span>
                     )}
                     <div className="muted" style={{ fontSize: 12 }}>{t.name}</div>
@@ -1061,7 +1115,7 @@ function Stat({ label, value, cls = "" }) {
 // =============================================================================
 function FilterDrawer({
   filters, onChange, onClose, runBeforeDays, runFollowDays,
-  upCount, downCount, rows, viewBefore, matchCount, predictionCount, totalCount,
+  upCount, downCount, rows, caps, viewBefore, matchCount, predictionCount, totalCount,
   sort, onSort, onClearSort, viewDay,
 }) {
   const [tab, setTab] = useState("window");
@@ -1101,7 +1155,8 @@ function FilterDrawer({
   const cats = [
     ["window", "Window", filters.viewBefore != null || filters.viewAfter != null],
     ["before", "Before-move", bm.on],
-    ["tradeable", "Tradeability", filters.tradeable !== "exclude_locked"],
+    ["tradeable", "Circuit freeze", filters.tradeable !== "exclude_locked"],
+    ["cap", "Market cap", !filters.cap.includes("all")],
     ["outcome", "Outcome", filters.outcome !== "all"],
     ["sort", "Sort by", !!sort.key],
   ];
@@ -1230,23 +1285,74 @@ function FilterDrawer({
               <>
                 <Radio name="tradeable" value="exclude_locked" cur={filters.tradeable}
                   onPick={(v) => set({ tradeable: v })}
-                  label="Only touches that could be shorted" note={`${rows.length - lockedCount}`} />
+                  label="Not frozen only (tradeable)" note={`${rows.length - lockedCount}`} />
                 <Radio name="tradeable" value="all" cur={filters.tradeable} onPick={(v) => set({ tradeable: v })}
-                  label="Include circuit-locked too" note={`all ${rows.length}`} />
+                  label="All — frozen and not" note={`all ${rows.length}`} />
                 <Radio name="tradeable" value="only_locked" cur={filters.tradeable} onPick={(v) => set({ tradeable: v })}
-                  label="Only circuit-locked" note={`${lockedCount}`} />
+                  label="Frozen only" note={`${lockedCount}`} />
                 <p className="drawer-note">
-                  <strong>{lockedCount} of {rows.length}</strong> touch{lockedCount === 1 ? "" : "es"} in this run
-                  closed within 0.15 points of its own high. On a move this size that is almost always an
-                  upper-circuit lock — only buyers, no sellers, so there was nobody to sell to and the short could
-                  never have been opened.
+                  <strong>Frozen</strong> means it closed within 0.15 points of the same high (or low) it touched —
+                  so it locked at the circuit for the rest of the session, with no sellers (or buyers) left to trade
+                  into. <strong>{lockedCount} of {rows.length}</strong> touch{lockedCount === 1 ? "" : "es"} in this
+                  run froze this way.
                 </p>
                 <p className="drawer-note">
-                  They are excluded by default because including them measures trades that were impossible. Switch
-                  to “include” only to see how much they were flattering the numbers.
+                  Frozen touches are excluded by default because including them measures trades that were
+                  impossible to place. Switch to "All" to see how much they were flattering the numbers.
                 </p>
               </>
             )}
+
+            {tab === "cap" && (() => {
+              const CAP_OPTS = [
+                { key: "large", label: "Large cap", note: "₹20,000 cr+" },
+                { key: "mid",   label: "Mid cap",   note: "₹5,000–20,000 cr" },
+                { key: "small", label: "Small cap",  note: "below ₹5,000 cr" },
+                { key: "unknown", label: "Unknown",  note: "not yet fetched" },
+              ];
+              const countFor = (k) => rows.filter((t) => (caps[t.symbol] ?? "unknown") === k).length;
+              const isAll = filters.cap.includes("all");
+              const toggleCap = (k) => {
+                if (k === "all") { set({ cap: ["all"] }); return; }
+                const cur = filters.cap.filter((x) => x !== "all");
+                const next = cur.includes(k) ? cur.filter((x) => x !== k) : [...cur, k];
+                set({ cap: next.length ? next : ["all"] });
+              };
+              const capsLoaded = Object.keys(caps).length > 0;
+              return (
+                <>
+                  {!capsLoaded && (
+                    <p className="drawer-note" style={{ marginTop: 0 }}>
+                      Fetching market cap data… badges will appear shortly.
+                    </p>
+                  )}
+                  <div className="chip-row">
+                    <button
+                      type="button"
+                      className={`chip${isAll ? " on" : ""}`}
+                      onClick={() => toggleCap("all")}
+                    >
+                      All <span className="chip-note">{rows.length}</span>
+                    </button>
+                    {CAP_OPTS.map(({ key, label }) => (
+                      <button
+                        key={key}
+                        type="button"
+                        className={`chip${!isAll && filters.cap.includes(key) ? " on" : ""}`}
+                        onClick={() => toggleCap(key)}
+                      >
+                        {label} <span className="chip-note">{countFor(key)}</span>
+                      </button>
+                    ))}
+                  </div>
+                  <p className="drawer-note">
+                    Buckets use SEBI thresholds: large ≥ ₹20,000 cr, mid ₹5,000–20,000 cr, small below ₹5,000 cr.
+                    Caps are fetched from Yahoo Finance for touched symbols only and cached for 7 days.
+                    Multi-select — pick any combination.
+                  </p>
+                </>
+              );
+            })()}
 
             {tab === "outcome" && (
               <>

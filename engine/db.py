@@ -339,6 +339,34 @@ CREATE TABLE IF NOT EXISTS band_touches (
     before_days          TEXT    NOT NULL DEFAULT '[]'
 );
 CREATE INDEX IF NOT EXISTS idx_band_touches_run ON band_touches(run_id);
+
+-- Manually tracked touches: a personal shortlist a user picks out of a scan and
+-- then follows day by day. Unlike band_study_runs (shared market data), this IS
+-- user-scoped — it's a hand-made selection, not a fact about the market.
+--
+-- The touch-day figures are copied in rather than joined back to band_touches:
+-- the scan run they came from can be re-run or deleted, and a tracked item
+-- should survive that. `follow_days` is refreshed from bhavcopy on demand and
+-- grows as real days pass, which is the whole point of tracking.
+CREATE TABLE IF NOT EXISTS tracked_touches (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id      TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    symbol       TEXT NOT NULL,
+    name         TEXT NOT NULL DEFAULT '',
+    touch_date   TEXT NOT NULL,
+    direction    TEXT NOT NULL DEFAULT 'up',
+    touch_pct    REAL,
+    close_pct    REAL,
+    touch_close  REAL,
+    note         TEXT NOT NULL DEFAULT '',
+    follow_days  TEXT NOT NULL DEFAULT '[]',  -- JSON, refreshed from bhavcopy
+    refreshed_at TEXT,
+    created_at   TEXT NOT NULL,
+    -- the same stock on the same day is one thing to track, so re-adding is a
+    -- harmless no-op via INSERT OR IGNORE
+    UNIQUE (user_id, symbol, touch_date)
+);
+CREATE INDEX IF NOT EXISTS idx_tracked_user ON tracked_touches(user_id, touch_date);
 """
 
 # Columns added to screener_movers after its first release. init_db ALTERs them

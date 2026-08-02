@@ -760,6 +760,28 @@ def get_band_study_run(run_id: int):
     return jsonify(detail)
 
 
+@bp.get("/band-study/runs/<int:run_id>/caps")
+@require_auth
+def band_study_run_caps(run_id: int):
+    """Return {symbol: cap_bucket} for every symbol touched in this run.
+
+    Fetched from Yahoo Finance (touched symbols only, never the whole exchange)
+    and cached for 7 days.  Served as a separate endpoint so the main run
+    detail loads instantly and cap badges appear a moment later.
+    """
+    from engine.market_cap import cap_buckets_for
+
+    detail = _band_study_repo().get_run(run_id)
+    if detail is None:
+        raise ApiError(404, "NotFound", f"no band study run with id {run_id}")
+    touches = detail.get("touches") or []
+    syms = list({t["symbol"] for t in touches})
+    data_root = current_app.config.get("DATA_ROOT", "data")
+    cache_file = os.path.join(data_root, "market_cap_cache.json")
+    caps = cap_buckets_for(syms, cache_file)
+    return jsonify({"caps": caps})
+
+
 # --- single-symbol quote (used by the trade form's market-price prefill) ----
 @bp.get("/prices/quote/<symbol>")
 @require_auth

@@ -1,0 +1,449 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Simple Scanner</title>
+<style>
+  :root {
+    --bg: #fafafa; --panel: #fff; --line: #e4e4e7; --text: #0a0a0a;
+    --muted: #71717a; --accent: #111; --pos: #157f3c; --neg: #c1121f;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; font: 15px/1.5 -apple-system, "Segoe UI", Roboto, sans-serif;
+    background: var(--bg); color: var(--text);
+  }
+  .wrap { max-width: 560px; margin: 0 auto; padding: 40px 20px; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  .sub { color: var(--muted); font-size: 13px; margin: 0 0 24px; }
+  .card {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+    padding: 20px; margin-bottom: 16px;
+  }
+  label { display: block; font-size: 12.5px; color: var(--muted); font-weight: 500; margin-bottom: 4px; }
+  input {
+    width: 100%; padding: 9px 10px; border: 1px solid #d4d4d8; border-radius: 6px;
+    font: inherit; margin-bottom: 14px;
+  }
+  input:focus { outline: none; border-color: var(--accent); }
+  .row { display: flex; gap: 12px; }
+  .row > div { flex: 1; }
+  .seg { display: inline-flex; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; margin-bottom: 16px; }
+  .seg button {
+    flex: 1; padding: 8px 14px; border: none; background: #f4f4f5; color: var(--muted);
+    font: inherit; font-weight: 600; cursor: pointer;
+  }
+  .seg button.on { background: var(--accent); color: #fff; }
+  button.primary {
+    width: 100%; padding: 11px; border: none; border-radius: 6px; background: var(--accent);
+    color: #fff; font: inherit; font-weight: 700; cursor: pointer;
+  }
+  button.primary:disabled { opacity: .5; cursor: not-allowed; }
+  .results { display: flex; gap: 12px; margin-top: 16px; }
+  .stat { flex: 1; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px; text-align: center; }
+  .stat .n { font-size: 30px; font-weight: 800; font-variant-numeric: tabular-nums; }
+  .stat .l { font-size: 12px; color: var(--muted); margin-top: 4px; }
+  .stat.up .n { color: var(--pos); }
+  .stat.down .n { color: var(--neg); }
+  .meta { font-size: 12.5px; color: var(--muted); margin-top: 10px; text-align: center; }
+  .err { color: var(--neg); font-size: 13px; margin-top: 10px; }
+  .hint { font-size: 12px; color: var(--muted); margin: -8px 0 14px; }
+
+  .lists { display: flex; gap: 16px; margin-top: 16px; align-items: flex-start; }
+  .lists > div { flex: 1; min-width: 0; }
+  .list-title {
+    font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: .03em;
+    margin-bottom: 8px;
+  }
+  .list-title.up { color: var(--pos); }
+  .list-title.down { color: var(--neg); }
+  ul.hits { list-style: none; margin: 0; padding: 0; max-height: 420px; overflow-y: auto; }
+  ul.hits li {
+    display: flex; justify-content: space-between; gap: 8px; padding: 8px 10px;
+    background: var(--panel); border: 1px solid var(--line); border-radius: 6px; margin-bottom: 6px;
+  }
+  ul.hits .sym-name { min-width: 0; }
+  ul.hits .sym { font-weight: 700; font-size: 13.5px; }
+  ul.hits .name { font-size: 11.5px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  ul.hits .right { text-align: right; flex-shrink: 0; }
+  ul.hits .pct { font-weight: 700; font-variant-numeric: tabular-nums; font-size: 13.5px; }
+  ul.hits .date { font-size: 11px; color: var(--muted); }
+  ul.hits .pct.up { color: var(--pos); }
+  ul.hits .pct.down { color: var(--neg); }
+  .empty-list { color: var(--muted); font-size: 12.5px; padding: 8px 2px; }
+
+  .controls { display: flex; gap: 12px; margin-top: 16px; align-items: flex-end; }
+  .controls > div { flex: 1; }
+  .controls label { margin-bottom: 4px; }
+  .controls input, .controls select { margin-bottom: 0; }
+  select {
+    width: 100%; padding: 9px 10px; border: 1px solid #d4d4d8; border-radius: 6px;
+    font: inherit; background: #fff; cursor: pointer;
+  }
+
+  .cap-filter { display: flex; flex-wrap: wrap; gap: 6px; }
+  .cap-chip {
+    display: inline-flex; align-items: center; gap: 5px; padding: 6px 12px;
+    border: 1px solid var(--line); border-radius: 999px; background: #f4f4f5;
+    color: var(--muted); font-size: 12.5px; font-weight: 600; cursor: pointer;
+    user-select: none;
+  }
+  .cap-chip input { display: none; }
+  .cap-chip.on { background: var(--accent); color: #fff; border-color: var(--accent); }
+
+  .cap-badge {
+    display: inline-block; font-size: 9.5px; font-weight: 700; letter-spacing: .02em;
+    padding: 1px 5px; border-radius: 4px; margin-top: 2px; background: #f4f4f5; color: var(--muted);
+  }
+  .cap-badge.large { background: #dbeafe; color: #1e40af; }
+  .cap-badge.mid { background: #fef3c7; color: #92400e; }
+  .cap-badge.small { background: #ede9fe; color: #5b21b6; }
+
+  .freeze-badge {
+    display: inline-block; font-size: 9.5px; font-weight: 700; letter-spacing: .02em;
+    padding: 1px 5px; border-radius: 4px; margin-top: 2px; margin-left: 4px;
+    background: #fee2e2; color: #991b1b;
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Simple Scanner</h1>
+  <p class="sub">Which stocks touched this % move, in this date range — up count and down count, with symbol and company name.</p>
+
+  <div class="card">
+    <div class="row">
+      <div>
+        <label>Start date</label>
+        <input type="date" id="startDate">
+      </div>
+      <div>
+        <label>End date</label>
+        <input type="date" id="endDate">
+      </div>
+    </div>
+
+    <label>Mode</label>
+    <div class="seg" style="display:flex;width:100%">
+      <button type="button" id="modeBand" class="on">Band range</button>
+      <button type="button" id="modeSingle">Single %</button>
+    </div>
+
+    <div id="bandFields">
+      <div class="row">
+        <div>
+          <label>Band low (%)</label>
+          <input type="number" id="bandLow" value="19" step="0.1">
+        </div>
+        <div>
+          <label>Band high (%)</label>
+          <input type="number" id="bandHigh" value="20" step="0.1">
+        </div>
+      </div>
+    </div>
+
+    <div id="singleFields" style="display:none">
+      <label>Touched at least (%)</label>
+      <input type="number" id="threshold" value="20" step="0.1">
+      <p class="hint">No upper limit — counts anything at or above this move, either direction.</p>
+    </div>
+
+    <button class="primary" id="scanBtn">Scan</button>
+    <div class="err" id="err" style="display:none"></div>
+  </div>
+
+  <div class="results" id="results" style="display:none">
+    <div class="stat up">
+      <div class="n" id="upCount">—</div>
+      <div class="l">touched up</div>
+    </div>
+    <div class="stat down">
+      <div class="n" id="downCount">—</div>
+      <div class="l">touched down</div>
+    </div>
+  </div>
+  <div class="meta" id="meta"></div>
+
+  <div class="controls" id="controls" style="display:none">
+    <div>
+      <label>Sort by</label>
+      <select id="sortBy">
+        <option value="pct">% move (biggest first)</option>
+        <option value="date">Date (earliest first)</option>
+        <option value="date_desc">Date (latest first)</option>
+      </select>
+    </div>
+    <div>
+      <label>Filter (symbol or name)</label>
+      <input type="text" id="filterText" placeholder="e.g. BANK">
+    </div>
+  </div>
+
+  <div style="margin-top:12px;display:none" id="capFilterWrap">
+    <label>Market cap</label>
+    <div class="cap-filter" id="capFilter">
+      <label class="cap-chip on" data-cap="all"><input type="checkbox" checked> All</label>
+      <label class="cap-chip" data-cap="large"><input type="checkbox"> Large cap</label>
+      <label class="cap-chip" data-cap="mid"><input type="checkbox"> Mid cap</label>
+      <label class="cap-chip" data-cap="small"><input type="checkbox"> Small cap</label>
+      <label class="cap-chip" data-cap="unknown"><input type="checkbox"> Unknown</label>
+    </div>
+  </div>
+
+  <div style="margin-top:12px;display:none" id="freezeFilterWrap">
+    <label>Circuit freeze</label>
+    <div class="cap-filter" id="freezeFilter">
+      <label class="cap-chip on" data-freeze="all"><input type="checkbox" checked> All</label>
+      <label class="cap-chip" data-freeze="frozen"><input type="checkbox"> Frozen (locked at the circuit)</label>
+      <label class="cap-chip" data-freeze="not_frozen"><input type="checkbox"> Not frozen</label>
+    </div>
+    <p class="hint" style="margin-top:8px">
+      "Frozen" means it closed right at the same high (or low) it touched — so it locked at the circuit for the
+      rest of the session, with no sellers (or buyers) left to trade into.
+    </p>
+  </div>
+
+  <div class="lists" id="lists" style="display:none">
+    <div>
+      <div class="list-title up">Touched up</div>
+      <ul class="hits" id="upList"></ul>
+    </div>
+    <div>
+      <div class="list-title down">Touched down</div>
+      <ul class="hits" id="downList"></ul>
+    </div>
+  </div>
+</div>
+
+<script>
+  const $ = (id) => document.getElementById(id);
+
+  // default range: the last 30 days
+  const today = new Date();
+  const monthAgo = new Date(today); monthAgo.setDate(monthAgo.getDate() - 30);
+  const iso = (d) => d.toISOString().slice(0, 10);
+  $("endDate").value = iso(today);
+  $("endDate").max = iso(today);
+  $("startDate").value = iso(monthAgo);
+  $("startDate").max = iso(today);
+
+  let mode = "band";
+  $("modeBand").onclick = () => setMode("band");
+  $("modeSingle").onclick = () => setMode("single");
+  function setMode(m) {
+    mode = m;
+    $("modeBand").classList.toggle("on", m === "band");
+    $("modeSingle").classList.toggle("on", m === "single");
+    $("bandFields").style.display = m === "band" ? "block" : "none";
+    $("singleFields").style.display = m === "single" ? "block" : "none";
+  }
+
+  // The last scan's raw results, kept in memory so sort/filter can re-render
+  // instantly without a round trip — the server already did the real work.
+  let lastUp = [];
+  let lastDown = [];
+
+  function sortHits(hits, sortBy, dir) {
+    const out = [...hits];
+    if (sortBy === "date") {
+      out.sort((a, b) => a.date.localeCompare(b.date) || a.symbol.localeCompare(b.symbol));
+    } else if (sortBy === "date_desc") {
+      out.sort((a, b) => b.date.localeCompare(a.date) || a.symbol.localeCompare(b.symbol));
+    } else {
+      // % move, biggest first: for "up" that's largest positive first, for
+      // "down" it's most negative first (already the server's default order).
+      out.sort((a, b) => (dir === "up" ? b.pct - a.pct : a.pct - b.pct));
+    }
+    return out;
+  }
+
+  function filterHits(hits, text) {
+    const q = text.trim().toUpperCase();
+    if (!q) return hits;
+    return hits.filter((h) => h.symbol.toUpperCase().includes(q) || (h.name || "").toUpperCase().includes(q));
+  }
+
+  // --- generic multi-select chip group: "All" mutually exclusive with the
+  // rest. Picking a specific value turns "All" off; turning every specific one
+  // back off (or re-picking "All") returns to showing everything — there is no
+  // dead state where nothing would be shown. Used for both market cap and
+  // freeze-status, keyed off `attr` (the chip's data-* name) so the two groups
+  // never interfere with each other despite sharing the same .cap-chip look.
+  function makeChipGroup(containerId, attr) {
+    const selected = new Set(["all"]);
+    const chips = () => document.querySelectorAll(`#${containerId} .cap-chip`);
+
+    function toggle(value) {
+      if (value === "all") {
+        selected.clear();
+        selected.add("all");
+      } else {
+        selected.delete("all");
+        if (selected.has(value)) selected.delete(value);
+        else selected.add(value);
+        if (selected.size === 0) selected.add("all");
+      }
+      for (const chip of chips()) {
+        const on = selected.has(chip.dataset[attr]);
+        chip.classList.toggle("on", on);
+        chip.querySelector("input").checked = on;
+      }
+      refreshLists();
+    }
+
+    for (const chip of chips()) {
+      chip.onclick = (e) => {
+        e.preventDefault(); // the chip itself drives state; don't let the native checkbox click race it
+        toggle(chip.dataset[attr]);
+      };
+    }
+
+    return {
+      selected,
+      reset: () => toggle("all"),
+      matches: (value) => selected.has("all") || selected.has(value),
+    };
+  }
+
+  const capGroup = makeChipGroup("capFilter", "cap");
+  const freezeGroup = makeChipGroup("freezeFilter", "freeze");
+
+  function filterByCap(hits) {
+    return hits.filter((h) => capGroup.matches(h.cap));
+  }
+
+  function filterByFreeze(hits) {
+    return hits.filter((h) => freezeGroup.matches(h.frozen ? "frozen" : "not_frozen"));
+  }
+
+  // Re-applies the current sort + filter controls to both lists, without
+  // touching the server — called on every scan result and every control change.
+  function refreshLists() {
+    const sortBy = $("sortBy").value;
+    const text = $("filterText").value;
+    const prep = (hits, dir) => sortHits(filterByFreeze(filterByCap(filterHits(hits, text))), sortBy, dir);
+    renderHits("upList", prep(lastUp, "up"), "up");
+    renderHits("downList", prep(lastDown, "down"), "down");
+  }
+
+  $("sortBy").onchange = refreshLists;
+  $("filterText").oninput = refreshLists;
+
+  // Built with DOM calls + textContent (never innerHTML) so a company name
+  // containing "<" or "&" — not unheard of in NSE's list — can't be
+  // interpreted as markup.
+  function renderHits(listId, hits, dir) {
+    const ul = $(listId);
+    ul.innerHTML = "";
+    if (!hits || hits.length === 0) {
+      const li = document.createElement("li");
+      li.className = "empty-list";
+      li.textContent = "none";
+      li.style.border = "none";
+      li.style.background = "none";
+      ul.appendChild(li);
+      return;
+    }
+    for (const h of hits) {
+      const li = document.createElement("li");
+
+      const left = document.createElement("div");
+      left.className = "sym-name";
+      const sym = document.createElement("div");
+      sym.className = "sym";
+      sym.textContent = h.symbol;
+      const name = document.createElement("div");
+      name.className = "name";
+      name.textContent = h.name || "";
+      left.appendChild(sym);
+      left.appendChild(name);
+      if (h.cap) {
+        const badge = document.createElement("span");
+        badge.className = `cap-badge ${h.cap}`;
+        badge.textContent = h.cap === "unknown" ? "cap n/a" : `${h.cap} cap`;
+        left.appendChild(badge);
+      }
+      if (h.frozen) {
+        const fz = document.createElement("span");
+        fz.className = "freeze-badge";
+        fz.textContent = "frozen";
+        fz.title = `Closed at ${h.close_pct > 0 ? "+" : ""}${h.close_pct}% — the same move it touched, so it locked there for the rest of the session`;
+        left.appendChild(fz);
+      }
+
+      const right = document.createElement("div");
+      right.className = "right";
+      const pct = document.createElement("div");
+      pct.className = `pct ${dir}`;
+      pct.textContent = `${h.pct > 0 ? "+" : ""}${h.pct}%`;
+      const date = document.createElement("div");
+      date.className = "date";
+      date.textContent = h.date;
+      right.appendChild(pct);
+      right.appendChild(date);
+
+      li.appendChild(left);
+      li.appendChild(right);
+      ul.appendChild(li);
+    }
+  }
+
+  $("scanBtn").onclick = async () => {
+    $("err").style.display = "none";
+    $("results").style.display = "none";
+    $("lists").style.display = "none";
+    $("controls").style.display = "none";
+    $("capFilterWrap").style.display = "none";
+    $("freezeFilterWrap").style.display = "none";
+    $("meta").textContent = "";
+
+    const payload = {
+      start_date: $("startDate").value,
+      end_date: $("endDate").value,
+      mode,
+    };
+    if (mode === "band") {
+      payload.band_low = Number($("bandLow").value);
+      payload.band_high = Number($("bandHigh").value);
+    } else {
+      payload.threshold = Number($("threshold").value);
+    }
+
+    $("scanBtn").disabled = true;
+    $("scanBtn").textContent = "Scanning…";
+    try {
+      const r = await fetch("/scan", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || "scan failed");
+
+      $("upCount").textContent = d.up_count;
+      $("downCount").textContent = d.down_count;
+      $("results").style.display = "flex";
+      $("meta").textContent = `${d.trading_days} trading day${d.trading_days === 1 ? "" : "s"} scanned`;
+
+      lastUp = d.up_hits || [];
+      lastDown = d.down_hits || [];
+      $("sortBy").value = "pct";
+      $("filterText").value = "";
+      capGroup.reset();
+      freezeGroup.reset(); // also calls refreshLists()
+      $("lists").style.display = "flex";
+      $("controls").style.display = "flex";
+      $("capFilterWrap").style.display = "block";
+      $("freezeFilterWrap").style.display = "block";
+    } catch (e) {
+      $("err").textContent = e.message;
+      $("err").style.display = "block";
+    } finally {
+      $("scanBtn").disabled = false;
+      $("scanBtn").textContent = "Scan";
+    }
+  };
+</script>
+</body>
+</html>

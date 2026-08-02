@@ -1030,3 +1030,90 @@ class BandStudyRepository:
             "missing_symbols": json.loads(run["missing_symbols"] or "[]"),
             "error": run["error"],
         }
+
+
+class TrackerRepository:
+    """A user's hand-picked shortlist of touches to follow day by day.
+
+    User-scoped, unlike BandStudyRepository: a scan is a fact about the market
+    and the same for everyone, but which touches you chose to watch is yours.
+
+    The touch-day numbers are copied in at add time rather than referenced back
+    to band_touches, so re-running or deleting the scan that surfaced a touch
+    never breaks the tracked item.
+    """
+
+    def __init__(self, db_path: str, user_id: str):
+        self.db_path = db_path
+        self.user_id = user_id
+
+    def add(self, touch: dict) -> bool:
+        """Returns False if this touch was already tracked (a harmless no-op)."""
+        with transaction(self.db_path) as conn:
+            cur = conn.execute(
+                """INSERT OR IGNORE INTO tracked_touches
+                   (user_id, symbol, name, touch_date, direction, touch_pct, close_pct,
+                    touch_close, note, created_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    self.user_id,
+                    touch["symbol"].strip().upper(),
+                    touch.get("name", ""),
+                    touch["touch_date"],
+                    touch.get("direction", "up"),
+                    touch.get("touch_pct"),
+                    touch.get("close_pct"),
+                    touch.get("touch_close"),
+                    touch.get("note", ""),
+                    _now(),
+                ),
+            )
+            return cur.rowcount > 0
+
+    def list_all(self) -> list[dict]:
+        with transaction(self.db_path) as conn:
+            rows = conn.execute(
+                "SELECT * FROM tracked_touches WHERE user_id = ? ORDER BY touch_date DESC, symbol",
+                (self.user_id,),
+            ).fetchall()
+        return [self._shape(r) for r in rows]
+
+    def remove(self, item_id: int) -> bool:
+        with transaction(self.db_path) as conn:
+            cur = conn.execute(
+                "DELETE FROM tracked_touches WHERE id = ? AND user_id = ?",
+                (item_id, self.user_id),
+            )
+            return cur.rowcount > 0
+
+    def set_note(self, item_id: int, note: str) -> bool:
+        with transaction(self.db_path) as conn:
+            cur = conn.execute(
+                "UPDATE tracked_touches SET note = ? WHERE id = ? AND user_id = ?",
+                (note[:500], item_id, self.user_id),
+            )
+            return cur.rowcount > 0
+
+    def save_follow_days(self, item_id: int, follow_days: list[dict]) -> None:
+        with transaction(self.db_path) as conn:
+            conn.execute(
+                "UPDATE tracked_touches SET follow_days = ?, refreshed_at = ? WHERE id = ? AND user_id = ?",
+                (json.dumps(follow_days), _now(), item_id, self.user_id),
+            )
+
+    @staticmethod
+    def _shape(r) -> dict:
+        return {
+            "id": r["id"],
+            "symbol": r["symbol"],
+            "name": r["name"],
+            "touch_date": r["touch_date"],
+            "direction": r["direction"],
+            "touch_pct": r["touch_pct"],
+            "close_pct": r["close_pct"],
+            "touch_close": r["touch_close"],
+            "note": r["note"],
+            "follow_days": json.loads(r["follow_days"] or "[]"),
+            "refreshed_at": r["refreshed_at"],
+            "created_at": r["created_at"],
+        }

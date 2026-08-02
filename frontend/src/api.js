@@ -149,4 +149,5 @@ export const api = {
   bandStudyStatus: () => request("/band-study/status"),
   listBandStudyRuns: () => request("/band-study/runs"),
   getBandStudyRun: (id) => request(`/band-study/runs/${enc(id)}`),
+  getBandStudyRunCaps: (id) => request(`/band-study/runs/${enc(id)}/caps`),
 };
