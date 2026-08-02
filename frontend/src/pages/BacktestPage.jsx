@@ -48,6 +48,12 @@ function dayExtremePct(t, day, which) {
   return ((price - t.close) / t.close) * 100;
 }
 
+// In "all days" view no single day is selected, so `_day` is null. The touch
+// itself carries the same `high`/`low`/`close` fields, so it stands in — the
+// same convention the outcome filter uses there (it falls back to the touch
+// day's own move). Without this a Low/High pick would silently empty the table.
+const extremeDay = (t) => t._day ?? t;
+
 function sortValue(t, key, viewDay, findDay, metric = "close") {
   // The per-day columns sort on whichever move is currently being scored, so
   // the ordering always matches the numbers actually on screen.
@@ -58,8 +64,8 @@ function sortValue(t, key, viewDay, findDay, metric = "close") {
   if (key === "close_pct") return t.close_pct;
   if (key === "_day_date") return findDay(t, viewDay)?.date ?? null;
   if (key === "_pct") return move(findDay(t, viewDay)) ?? null;
-  if (key === "_high") return dayExtremePct(t, findDay(t, viewDay), "high");
-  if (key === "_low") return dayExtremePct(t, findDay(t, viewDay), "low");
+  if (key === "_high") return dayExtremePct(t, viewDay === 0 ? t : findDay(t, viewDay), "high");
+  if (key === "_low") return dayExtremePct(t, viewDay === 0 ? t : findDay(t, viewDay), "low");
   if (key.startsWith("offset:")) return move(findDay(t, Number(key.slice(7)))) ?? null;
   return null;
 }
@@ -138,6 +144,13 @@ const DEFAULT_FILTERS = {
   // View-only: this is the thing being PREDICTED, so it may never feed the
   // panel — filtering by it and then scoring it would always read 100%.
   outcome: "all",       // "all" | "up" | "down"
+  // View-only, same reason as `outcome`: where the viewed day's low and high
+  // landed relative to the touch close is part of what happened AFTER the
+  // touch, so these narrow the rows without ever touching the panel.
+  //   "up"   — stayed above the touch close (low) / traded above it (high)
+  //   "down" — dipped below the touch close (low) / never got above it (high)
+  low: "all",           // "all" | "up" | "down"
+  high: "all",          // "all" | "up" | "down"
   // Pre-trade: cap bucket is visible before placing the trade.
   // Multi-select: ["all"] means no filter; any specific buckets narrow to those.
   cap: ["all"],         // ["all"] | subset of ["large","mid","small","unknown"]
@@ -220,6 +233,8 @@ function countActiveFilters(f, runBefore, runAfter) {
   if (f.beforeMove.on) n++;
   if (f.tradeable !== "exclude_locked") n++; // the default is itself a filter
   if (f.outcome !== "all") n++;
+  if (f.low !== "all") n++;
+  if (f.high !== "all") n++;
   if (!f.cap.includes("all")) n++;
   if (!f.dow.includes("all")) n++;
   if (f.viewBefore != null && f.viewBefore < runBefore) n++;
@@ -470,11 +485,32 @@ function BandStudy({ singleDate }) {
   // the thing being predicted; scoring a set selected BY that outcome would
   // always read 100% and mean nothing.
   const visibleTouches = useMemo(() => {
-    if (filters.outcome === "all") return predictionTouches;
-    return predictionTouches.filter((t) =>
-      filters.outcome === "up" ? t._outcome > 0 : t._outcome != null && t._outcome < 0
-    );
-  }, [predictionTouches, filters.outcome]);
+    return predictionTouches.filter((t) => {
+      if (filters.outcome !== "all") {
+        const ok = filters.outcome === "up" ? t._outcome > 0 : t._outcome != null && t._outcome < 0;
+        if (!ok) return false;
+      }
+      // A day with no data has no low/high to judge, so it drops out of a
+      // specific pick rather than silently counting as one side.
+      for (const [key, which] of [[filters.low, "low"], [filters.high, "high"]]) {
+        if (key === "all") continue;
+        const v = dayExtremePct(t, extremeDay(t), which);
+        if (v == null) return false;
+        if (key === "up" ? v < 0 : v >= 0) return false;
+      }
+      return true;
+    });
+  }, [predictionTouches, filters.outcome, filters.low, filters.high]);
+
+  // Plain-English list of whichever view-only filters are on, for the note that
+  // explains why the row count and the panel count disagree.
+  const viewOnlyFilters = useMemo(() => {
+    const out = [];
+    if (filters.outcome !== "all") out.push(filters.outcome === "up" ? "the risers" : "the fallers");
+    if (filters.low !== "all") out.push(filters.low === "up" ? "days whose low stayed above the touch close" : "days whose low dipped below the touch close");
+    if (filters.high !== "all") out.push(filters.high === "up" ? "days that traded above the touch close" : "days that never got above the touch close");
+    return out;
+  }, [filters.outcome, filters.low, filters.high]);
 
   // Only what the circuit-lock rule ITSELF removed — a touch that the
   // before-move filter would have dropped anyway is not counted here, so the
@@ -649,7 +685,7 @@ function BandStudy({ singleDate }) {
           touches={visibleTouches}
           predictionTouches={predictionTouches}
           totalCount={touches.length}
-          outcomeFilter={filters.outcome}
+          viewOnlyFilters={viewOnlyFilters}
           beforeMoveOn={filters.beforeMove.on}
           lockedExcluded={lockedExcluded}
           metric={metric}
@@ -679,6 +715,7 @@ function BandStudy({ singleDate }) {
           upCount={upCount}
           downCount={downCount}
           rows={rows}
+          predictionRows={predictionTouches}
           caps={caps}
           viewBefore={viewBefore}
           matchCount={visibleTouches.length}
@@ -695,7 +732,7 @@ function BandStudy({ singleDate }) {
 }
 
 function BandStudyResult({
-  run, touches, predictionTouches, totalCount, outcomeFilter, beforeMoveOn, lockedExcluded, metric, onMetric,
+  run, touches, predictionTouches, totalCount, viewOnlyFilters, beforeMoveOn, lockedExcluded, metric, onMetric,
   onSort, sortArrow, viewDay, onViewDay, followDays, beforeDays,
   selectedTouch, onSelectTouch, findDay, onOpenFilters, activeFilterCount, caps,
 }) {
@@ -834,11 +871,14 @@ function BandStudyResult({
         </p>
       )}
 
-      {outcomeFilter !== "all" && (
+      {/* Every view-only filter lands here: each narrows the rows while the
+          panel keeps scoring the full prediction set, and the reader has to be
+          told, or the two counts look like a bug. */}
+      {viewOnlyFilters.length > 0 && (
         <p className="muted" style={{ fontSize: 12.5, margin: "-4px 0 14px" }}>
-          The rows below are filtered to the {outcomeFilter === "up" ? "risers" : "fallers"} ({touches.length} of{" "}
-          {predictionTouches.length}), but the panel above still scores all {predictionTouches.length} — filtering by
-          the outcome and then scoring it would just read 100% and predict nothing.
+          The rows below are filtered to {viewOnlyFilters.join(", ")} ({touches.length} of{" "}
+          {predictionTouches.length}), but the panel above still scores all {predictionTouches.length} — these describe
+          what happened after the touch, so filtering by them and then scoring would just report the choice back.
         </p>
       )}
 
@@ -1157,7 +1197,7 @@ function Stat({ label, value, cls = "" }) {
 // =============================================================================
 function FilterDrawer({
   filters, onChange, onClose, runBeforeDays, runFollowDays,
-  upCount, downCount, rows, caps, viewBefore, matchCount, predictionCount, totalCount,
+  upCount, downCount, rows, predictionRows, caps, viewBefore, matchCount, predictionCount, totalCount,
   sort, onSort, onClearSort, viewDay,
 }) {
   const [tab, setTab] = useState("window");
@@ -1202,6 +1242,7 @@ function FilterDrawer({
     ["cap", "Market cap", !filters.cap.includes("all")],
     ["dow", "Day of week", !filters.dow.includes("all")],
     ["outcome", "Outcome", filters.outcome !== "all"],
+    ["lowhigh", "Low / High", filters.low !== "all" || filters.high !== "all"],
     ["sort", "Sort by", !!sort.key],
   ];
 
@@ -1458,6 +1499,47 @@ function FilterDrawer({
                 </p>
               </>
             )}
+
+            {tab === "lowhigh" && (() => {
+              const countFor = (which, dir) =>
+                predictionRows.filter((t) => {
+                  const v = dayExtremePct(t, extremeDay(t), which);
+                  return v != null && (dir === "up" ? v >= 0 : v < 0);
+                }).length;
+              const group = (which, label, upLabel, downLabel, upHint, downHint) => (
+                <>
+                  <div className="card-title" style={{ marginBottom: 8 }}>{label}</div>
+                  <Radio name={which} value="all" cur={filters[which]} onPick={(v) => set({ [which]: v })}
+                    label="Any" note={`${predictionRows.length}`} />
+                  <Radio name={which} value="up" cur={filters[which]} onPick={(v) => set({ [which]: v })}
+                    label={upLabel} note={`${countFor(which, "up")}`} />
+                  <Radio name={which} value="down" cur={filters[which]} onPick={(v) => set({ [which]: v })}
+                    label={downLabel} note={`${countFor(which, "down")}`} />
+                  <p className="drawer-note">{upHint} {downHint}</p>
+                </>
+              );
+              return (
+                <>
+                  {group("low", "Day's low", "Up — stayed above", "Down — dipped below",
+                    "Up keeps days whose lowest trade never fell under the touch close.",
+                    "Down keeps the ones that went under it at some point.")}
+                  {group("high", "Day's high", "Up — traded above", "Down — never got above",
+                    "Up keeps days that traded above the touch close at some point.",
+                    "Down keeps the ones whose best price still sat under it.")}
+                  <p className="drawer-note">
+                    Both read against the <strong>touch day's close</strong> on the day currently selected
+                    ({viewDay === 0 ? "the touch day's own range, since all days are shown" : dayLabel(viewDay)}), so
+                    the counts move as you switch days. Days with no data are dropped by a specific pick rather than
+                    counted as one side.
+                  </p>
+                  <p className="drawer-note">
+                    <strong>Like Outcome, these only hide table rows — the panel above is untouched.</strong> Where the
+                    low and high landed is part of what happened after the touch, so scoring a set chosen by it would
+                    just report that choice back.
+                  </p>
+                </>
+              );
+            })()}
 
             {tab === "sort" && (
               <>
