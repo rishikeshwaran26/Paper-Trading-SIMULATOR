@@ -38,6 +38,16 @@ function bandLabel(low, high) {
 // Resolves any sortable column's value for one touch. `offset:<n>` keys cover
 // the per-day columns shown in the "all days" table view; the rest cover the
 // fixed columns shown in the single-day view.
+// How far a day's high (or low) ran from the TOUCH day's close — the same
+// baseline pct_from_touch uses, so the three columns read as one story: how far
+// the trade could have gone in your favour, how far it went against you, and
+// where it actually settled.
+function dayExtremePct(t, day, which) {
+  const price = day?.[which];
+  if (price == null || !t.close) return null;
+  return ((price - t.close) / t.close) * 100;
+}
+
 function sortValue(t, key, viewDay, findDay, metric = "close") {
   // The per-day columns sort on whichever move is currently being scored, so
   // the ordering always matches the numbers actually on screen.
@@ -48,7 +58,8 @@ function sortValue(t, key, viewDay, findDay, metric = "close") {
   if (key === "close_pct") return t.close_pct;
   if (key === "_day_date") return findDay(t, viewDay)?.date ?? null;
   if (key === "_pct") return move(findDay(t, viewDay)) ?? null;
-  if (key === "_open_close") return findDay(t, viewDay)?.open_close_pct ?? null;
+  if (key === "_high") return dayExtremePct(t, findDay(t, viewDay), "high");
+  if (key === "_low") return dayExtremePct(t, findDay(t, viewDay), "low");
   if (key.startsWith("offset:")) return move(findDay(t, Number(key.slice(7)))) ?? null;
   return null;
 }
@@ -935,8 +946,11 @@ function BandStudyResult({
                   <th className="num sortable" onClick={() => onSort("_pct")}>
                     {dayLabel(viewDay)} change{sortArrow("_pct")}
                   </th>
-                  <th className="num sortable" onClick={() => onSort("_open_close")}>
-                    Open→close{sortArrow("_open_close")}
+                  <th className="num sortable" onClick={() => onSort("_low")} title="Lowest the stock traded that day, measured from the touch day's close">
+                    Low{sortArrow("_low")}
+                  </th>
+                  <th className="num sortable" onClick={() => onSort("_high")} title="Highest the stock traded that day, measured from the touch day's close">
+                    High{sortArrow("_high")}
                   </th>
                   <th></th>
                 </>
@@ -992,9 +1006,14 @@ function BandStudyResult({
                       <td className={`num ${t._pct != null ? (t._pct >= 0 ? "pos" : "neg") : ""}`}>
                         {t._pct != null ? pct(t._pct) : "—"}
                       </td>
-                      <td className={`num ${t._day?.open_close_pct != null ? (t._day.open_close_pct >= 0 ? "pos" : "neg") : ""}`}>
-                        {t._day?.open_close_pct != null ? pct(t._day.open_close_pct) : "—"}
-                      </td>
+                      {[["low", "_low"], ["high", "_high"]].map(([which]) => {
+                        const v = dayExtremePct(t, t._day, which);
+                        return (
+                          <td key={which} className={`num ${v == null ? "" : v >= 0 ? "pos" : "neg"}`}>
+                            {v != null ? pct(v) : "—"}
+                          </td>
+                        );
+                      })}
                       <td>
                         {t._pct == null ? (
                           <span className="chip muted">no data</span>
@@ -1166,7 +1185,8 @@ function FilterDrawer({
     ["touch_pct", "Touch %"],
     ["close_pct", "Close %"],
     ["_pct", `${viewDay === 0 ? "Viewed day" : dayLabel(viewDay)} change`],
-    ["_open_close", "Open→close"],
+    ["_low", "Low"],
+    ["_high", "High"],
   ];
 
   // Day -1 needs day -2's close, so the furthest tracked day can never be
