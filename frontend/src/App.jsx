@@ -9,6 +9,7 @@ import AnalyticsPage from "./pages/AnalyticsPage.jsx";
 import WatchlistPage from "./pages/WatchlistPage.jsx";
 import ScreenerPage from "./pages/ScreenerPage.jsx";
 import BacktestPage from "./pages/BacktestPage.jsx";
+import StockChartPage from "./pages/StockChartPage.jsx";
 import LoginPage from "./pages/LoginPage.jsx";
 import { api } from "./api.js";
 import { getToken, clearToken } from "./auth.js";
@@ -61,6 +62,7 @@ export default function App() {
           <Route path="/watchlist" element={<WatchlistPage />} />
           <Route path="/screener" element={<ScreenerPage />} />
           <Route path="/backtest" element={<BacktestPage />} />
+          <Route path="/backtest/chart/:symbol" element={<StockChartPage />} />
         </Routes>
       </Layout>
     </BrowserRouter>

@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { Link } from "react-router-dom";
 import { api } from "../api.js";
 import { Loading, ErrorBanner } from "../components/Status.jsx";
 import { pct } from "../format.js";
@@ -1005,7 +1006,7 @@ function BandStudyResult({
                       </td>
                     </>
                   )}
-                  <td>
+                  <td style={{ display: "flex", gap: 6 }}>
                     <button
                       type="button"
                       className={`small ${isSelected ? "primary" : ""}`}
@@ -1013,6 +1014,14 @@ function BandStudyResult({
                     >
                       {isSelected ? "Hide" : "Chart"}
                     </button>
+                    <Link
+                      to={`/backtest/chart/${encodeURIComponent(t.symbol)}?date=${encodeURIComponent(t.date)}`}
+                      target="_blank"
+                      className="small"
+                      title="Open full candlestick chart in a new tab"
+                    >
+                      Candles ↗
+                    </Link>
                   </td>
                 </tr>
               );

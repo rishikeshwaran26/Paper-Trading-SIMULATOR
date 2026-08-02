@@ -867,7 +867,7 @@ def price_history(symbol: str):
     interval = request.args.get("interval", "1d")
     # Whitelist: these strings go to an upstream API, so don't pass through
     # arbitrary user input.
-    if period not in {"5d", "1mo", "3mo", "6mo", "1y", "2y", "5y", "ytd", "max"}:
+    if period not in {"1d", "5d", "1mo", "3mo", "6mo", "1y", "2y", "5y", "ytd", "max"}:
         raise ApiError(400, "BadRequest", "unsupported period")
     if interval not in {"5m", "15m", "30m", "1h", "1d", "1wk", "1mo"}:
         raise ApiError(400, "BadRequest", "unsupported interval")
