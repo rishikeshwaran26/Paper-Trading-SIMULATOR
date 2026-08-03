@@ -110,18 +110,32 @@
 <body>
 <div class="wrap">
   <h1>Simple Scanner</h1>
-  <p class="sub">Which stocks touched this % move, in this date range — up count and down count, with symbol and company name.</p>
+  <p class="sub">Which stocks touched this % move, on a single date or across a range — up count and down count, with symbol and company name.</p>
 
   <div class="card">
-    <div class="row">
-      <div>
-        <label>Start date</label>
-        <input type="date" id="startDate">
+    <label>Dates</label>
+    <div class="seg" style="display:flex;width:100%">
+      <button type="button" id="dateRange" class="on">Date range</button>
+      <button type="button" id="dateSingle">Single date</button>
+    </div>
+
+    <div id="rangeFields">
+      <div class="row">
+        <div>
+          <label>Start date</label>
+          <input type="date" id="startDate">
+        </div>
+        <div>
+          <label>End date</label>
+          <input type="date" id="endDate">
+        </div>
       </div>
-      <div>
-        <label>End date</label>
-        <input type="date" id="endDate">
-      </div>
+    </div>
+
+    <div id="oneDayFields" style="display:none">
+      <label>Date</label>
+      <input type="date" id="oneDate">
+      <p class="hint">Scans that single trading day. A weekend or holiday returns no rows.</p>
     </div>
 
     <label>Mode</label>
@@ -239,6 +253,21 @@
   $("endDate").max = iso(today);
   $("startDate").value = iso(monthAgo);
   $("startDate").max = iso(today);
+  $("oneDate").value = iso(today);
+  $("oneDate").max = iso(today);
+
+  // A single date is just a range whose ends match, so the server needs no
+  // second code path — only the form changes.
+  let dateMode = "range";
+  $("dateRange").onclick = () => setDateMode("range");
+  $("dateSingle").onclick = () => setDateMode("single");
+  function setDateMode(m) {
+    dateMode = m;
+    $("dateRange").classList.toggle("on", m === "range");
+    $("dateSingle").classList.toggle("on", m === "single");
+    $("rangeFields").style.display = m === "range" ? "block" : "none";
+    $("oneDayFields").style.display = m === "single" ? "block" : "none";
+  }
 
   let mode = "band";
   $("modeBand").onclick = () => setMode("band");
@@ -419,9 +448,10 @@
     $("dowFilterWrap").style.display = "none";
     $("meta").textContent = "";
 
+    const oneDay = dateMode === "single";
     const payload = {
-      start_date: $("startDate").value,
-      end_date: $("endDate").value,
+      start_date: oneDay ? $("oneDate").value : $("startDate").value,
+      end_date: oneDay ? $("oneDate").value : $("endDate").value,
       mode,
     };
     if (mode === "band") {
@@ -445,7 +475,11 @@
       $("upCount").textContent = d.up_count;
       $("downCount").textContent = d.down_count;
       $("results").style.display = "flex";
-      $("meta").textContent = `${d.trading_days} trading day${d.trading_days === 1 ? "" : "s"} scanned`;
+      // 0 means every date asked for was a weekend/holiday — worth saying
+      // outright, since "0 up, 0 down" otherwise looks like a real result.
+      $("meta").textContent = d.trading_days === 0
+        ? "No trading day in that selection — weekend, holiday, or NSE has not published it yet."
+        : `${d.trading_days} trading day${d.trading_days === 1 ? "" : "s"} scanned`;
 
       lastUp = d.up_hits || [];
       lastDown = d.down_hits || [];
