@@ -159,6 +159,10 @@ button:focus-visible, a:focus-visible { outline-offset: 3px; }
 .tag.cap-large { background: #1a3a5c22; color: #3b82f6; margin-left: 6px; font-weight: 600; }
 .tag.cap-mid   { background: #3a1a5c22; color: #a855f7; margin-left: 6px; font-weight: 600; }
 .tag.cap-small { background: #1a3a1a22; color: #22c55e; margin-left: 6px; font-weight: 600; }
+/* 52-week position: the one place a touch's context earns colour, so it reads
+   at a glance next to the neutral cap badge. */
+.tag.w52-high { background: var(--pos-soft); color: var(--pos); margin-left: 6px; font-weight: 600; }
+.tag.w52-low  { background: var(--neg-soft); color: var(--neg); margin-left: 6px; font-weight: 600; }
 .chip {
   display: inline-block; padding: 3px 10px; border-radius: 999px; background: var(--panel-2);
   border: 1px solid var(--line); font-size: 12px; margin: 3px 4px 0 0; color: var(--text);

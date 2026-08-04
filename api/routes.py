@@ -782,6 +782,30 @@ def band_study_run_caps(run_id: int):
     return jsonify({"caps": caps})
 
 
+@bp.get("/band-study/runs/<int:run_id>/week52")
+@require_auth
+def band_study_run_week52(run_id: int):
+    """Where each touch sat in its own 52-week range, as of the touch date.
+
+    Rebuilt from the bhavcopy cache rather than stored on the run, so runs
+    scanned before this existed get the labels too, with no re-scan. Separate
+    endpoint for the same reason as caps: the run detail should not wait on it.
+    """
+    from engine.week52 import classify
+
+    detail = _band_study_repo().get_run(run_id)
+    if detail is None:
+        raise ApiError(404, "NotFound", f"no band study run with id {run_id}")
+    touches = detail.get("touches") or []
+    data_root = current_app.config.get("DATA_ROOT", "data")
+    labels = classify(
+        touches,
+        os.path.join(data_root, "bhavcopy_cache"),
+        os.path.join(data_root, "week52_cache.json"),
+    )
+    return jsonify({"week52": labels})
+
+
 # --- single-symbol quote (used by the trade form's market-price prefill) ----
 @bp.get("/prices/quote/<symbol>")
 @require_auth

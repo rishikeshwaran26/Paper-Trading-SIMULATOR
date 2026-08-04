@@ -158,7 +158,29 @@ const DEFAULT_FILTERS = {
   // shape as cap: ["all"] means no filter. Values are JS getUTCDay() numbers
   // (1=Mon..5=Fri) as strings, since touch dates never fall on a weekend.
   dow: ["all"],
+  // Pre-trade: where the touch sat in its own 52-week range, judged only on
+  // data that existed before the touch day — so unlike low/high this one is a
+  // legitimate predictor and DOES feed the panel.
+  w52: ["all"],         // ["all"] | subset of W52_KEYS
 };
+
+// Exclusive buckets, so "made a new high" and "froze at a new high" can be
+// counted apart. Order is the order they appear in the drawer.
+const W52_OPTS = [
+  { key: "new_high", label: "New 52w high" },
+  { key: "froze_high", label: "Froze at 52w high" },
+  { key: "near_high", label: "Near 52w high" },
+  { key: "new_low", label: "New 52w low" },
+  { key: "froze_low", label: "Froze at 52w low" },
+  { key: "near_low", label: "Near 52w low" },
+  { key: "none", label: "Inside its range" },
+  { key: "unknown", label: "Not enough history" },
+];
+
+// The engine keys these by symbol AND date: the same stock can touch twice in
+// one run and sit differently in its 52-week range each time.
+const w52Key = (t) => `${t.symbol}|${t.date}`;
+const w52Bucket = (t, w52) => w52[w52Key(t)]?.bucket ?? "unknown";
 
 // t.date is "YYYY-MM-DD". Parsed as UTC midnight by the Date constructor, so
 // getUTCDay() (not getDay()) is the one that matches the calendar date
@@ -237,6 +259,7 @@ function countActiveFilters(f, runBefore, runAfter) {
   if (f.high !== "all") n++;
   if (!f.cap.includes("all")) n++;
   if (!f.dow.includes("all")) n++;
+  if (!f.w52.includes("all")) n++;
   if (f.viewBefore != null && f.viewBefore < runBefore) n++;
   if (f.viewAfter != null && f.viewAfter < runAfter) n++;
   return n;
@@ -314,6 +337,7 @@ function BandStudy({ singleDate }) {
   const [run, setRun] = useState(null);
   const [runs, setRuns] = useState([]);
   const [caps, setCaps] = useState({});   // symbol -> "large"|"mid"|"small"|"unknown"
+  const [w52, setW52] = useState({});     // "SYMBOL|DATE" -> { bucket, w52_high, w52_low }
   const [status, setStatus] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -334,6 +358,7 @@ function BandStudy({ singleDate }) {
   async function loadRun(id) {
     setLoading(true);
     setCaps({});
+    setW52({});
     try {
       const d = await api.getBandStudyRun(id);
       setRun(d);
@@ -356,6 +381,9 @@ function BandStudy({ singleDate }) {
       // Caps are fetched separately so the run loads instantly and badges arrive
       // a moment later (first call fetches from Yahoo, subsequent from cache).
       api.getBandStudyRunCaps(id).then((c) => setCaps(c.caps ?? {})).catch(() => {});
+      // Same deal for the 52-week labels — rebuilt from the bhavcopy cache, so
+      // the first call on a wide run takes a few seconds and later ones don't.
+      api.getBandStudyRunWeek52(id).then((w) => setW52(w.week52 ?? {})).catch(() => {});
     } catch (e) {
       setError(e);
     } finally {
@@ -476,9 +504,11 @@ function BandStudy({ singleDate }) {
         if (!filters.cap.includes(bucket)) return false;
       }
       if (!filters.dow.includes("all") && !filters.dow.includes(touchDow(t))) return false;
+      if (!filters.w52.includes("all") && !filters.w52.includes(w52Bucket(t, w52))) return false;
       return passesBeforeMove(t, filters.beforeMove, viewBefore);
     }),
-    [sortedTouches, filters.beforeMove, filters.tradeable, filters.cap, filters.dow, caps, viewBefore]
+    [sortedTouches, filters.beforeMove, filters.tradeable, filters.cap, filters.dow, filters.w52,
+     caps, w52, viewBefore]
   );
 
   // + the outcome filter. Rows only — never the panel, because the outcome is
@@ -702,6 +732,7 @@ function BandStudy({ singleDate }) {
           onOpenFilters={() => setDrawerOpen(true)}
           activeFilterCount={activeFilterCount}
           caps={caps}
+          w52={w52}
         />
       )}
 
@@ -717,6 +748,7 @@ function BandStudy({ singleDate }) {
           rows={rows}
           predictionRows={predictionTouches}
           caps={caps}
+          w52={w52}
           viewBefore={viewBefore}
           matchCount={visibleTouches.length}
           predictionCount={predictionTouches.length}
@@ -734,7 +766,7 @@ function BandStudy({ singleDate }) {
 function BandStudyResult({
   run, touches, predictionTouches, totalCount, viewOnlyFilters, beforeMoveOn, lockedExcluded, metric, onMetric,
   onSort, sortArrow, viewDay, onViewDay, followDays, beforeDays,
-  selectedTouch, onSelectTouch, findDay, onOpenFilters, activeFilterCount, caps,
+  selectedTouch, onSelectTouch, findDay, onOpenFilters, activeFilterCount, caps, w52,
 }) {
   const flaggedCount = touches.filter((t) => t.corporate_action_suspected).length;
   const dayOffsets = Array.from({ length: followDays }, (_, i) => i + 1);
@@ -1020,6 +1052,19 @@ function BandStudyResult({
                         {caps[t.symbol]}
                       </span>
                     )}
+                    {(() => {
+                      const b = w52[w52Key(t)];
+                      if (!b || b.bucket === "none" || b.bucket === "unknown") return null;
+                      const side = b.bucket.endsWith("high") ? "high" : "low";
+                      return (
+                        <span
+                          className={`tag w52-${side}`}
+                          title={`52w high ${b.w52_high} · 52w low ${b.w52_low} (from ${b.bars} prior sessions)`}
+                        >
+                          {W52_OPTS.find((o) => o.key === b.bucket)?.label ?? b.bucket}
+                        </span>
+                      );
+                    })()}
                     <div className="muted" style={{ fontSize: 12 }}>{t.name}</div>
                   </td>
                   <td className="num">{t.date}</td>
@@ -1197,7 +1242,7 @@ function Stat({ label, value, cls = "" }) {
 // =============================================================================
 function FilterDrawer({
   filters, onChange, onClose, runBeforeDays, runFollowDays,
-  upCount, downCount, rows, predictionRows, caps, viewBefore, matchCount, predictionCount, totalCount,
+  upCount, downCount, rows, predictionRows, caps, w52, viewBefore, matchCount, predictionCount, totalCount,
   sort, onSort, onClearSort, viewDay,
 }) {
   const [tab, setTab] = useState("window");
@@ -1241,6 +1286,7 @@ function FilterDrawer({
     ["tradeable", "Circuit freeze", filters.tradeable !== "exclude_locked"],
     ["cap", "Market cap", !filters.cap.includes("all")],
     ["dow", "Day of week", !filters.dow.includes("all")],
+    ["w52", "52-week range", !filters.w52.includes("all")],
     ["outcome", "Outcome", filters.outcome !== "all"],
     ["lowhigh", "Low / High", filters.low !== "all" || filters.high !== "all"],
     ["sort", "Sort by", !!sort.key],
@@ -1475,6 +1521,51 @@ function FilterDrawer({
                   <p className="drawer-note">
                     Filters to touches whose spike happened on the picked weekday(s). Multi-select — pick any
                     combination.
+                  </p>
+                </>
+              );
+            })()}
+
+            {tab === "w52" && (() => {
+              const countFor = (k) => rows.filter((t) => w52Bucket(t, w52) === k).length;
+              const isAll = filters.w52.includes("all");
+              const toggle = (k) => {
+                if (k === "all") { set({ w52: ["all"] }); return; }
+                const cur = filters.w52.filter((x) => x !== "all");
+                const next = cur.includes(k) ? cur.filter((x) => x !== k) : [...cur, k];
+                set({ w52: next.length ? next : ["all"] });
+              };
+              const loaded = Object.keys(w52).length > 0;
+              return (
+                <>
+                  <div className="chip-row">
+                    <button type="button" className={`chip${isAll ? " on" : ""}`} onClick={() => toggle("all")}>
+                      All <span className="chip-note">{rows.length}</span>
+                    </button>
+                    {W52_OPTS.map(({ key, label }) => (
+                      <button
+                        key={key}
+                        type="button"
+                        className={`chip${!isAll && filters.w52.includes(key) ? " on" : ""}`}
+                        onClick={() => toggle(key)}
+                      >
+                        {label} <span className="chip-note">{countFor(key)}</span>
+                      </button>
+                    ))}
+                  </div>
+                  {!loaded && <p className="drawer-note">Still rebuilding the 52-week levels…</p>}
+                  <p className="drawer-note">
+                    Where the touch sat in its own 52-week range <strong>on the touch date</strong> — measured only
+                    from bars before that day, never with hindsight. <em>New</em> means the day's high (or low) went
+                    past the previous 52-week extreme; <em>froze</em> means it did that and then locked there, with
+                    no one left to trade against; <em>near</em> means within {Math.round(0.03 * 100)}% without
+                    reaching it. New and froze are separate, so pick both for every touch that broke out.
+                  </p>
+                  <p className="drawer-note">
+                    <strong>This one does feed the panel.</strong> All of it was knowable before the trade, so
+                    unlike Outcome or Low/High it is a fair thing to score a prediction on.
+                    <em> Not enough history</em> covers touches whose 52-week window starts before the cached
+                    bhavcopy does.
                   </p>
                 </>
               );

@@ -150,4 +150,5 @@ export const api = {
   listBandStudyRuns: () => request("/band-study/runs"),
   getBandStudyRun: (id) => request(`/band-study/runs/${enc(id)}`),
   getBandStudyRunCaps: (id) => request(`/band-study/runs/${enc(id)}/caps`),
+  getBandStudyRunWeek52: (id) => request(`/band-study/runs/${enc(id)}/week52`),
 };
