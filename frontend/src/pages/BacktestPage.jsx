@@ -54,6 +54,25 @@ function dayExtremePct(t, day, which) {
 // day's own move). Without this a Low/High pick would silently empty the table.
 const extremeDay = (t) => t._day ?? t;
 
+// The overnight GAP into one tracked day: its own open against the close of
+// the trading day right before it — "stock X froze at 20% on Jan 5, then
+// opened above Jan 5's close on Jan 6" is exactly this, for offset +1.
+//
+// offset 1's "day before" is the touch itself (day 0 is never stored as a
+// FollowDay — the touch fields ARE day 0), so it is the one case handled
+// separately. Every other offset, before or after, is the previous tracked
+// day at offset-1 — the same "prior" convention beforeDayOwnMove already
+// uses for before-days, which is why it falls out of one formula either side
+// of the touch.
+function dayGapPct(t, offset, findDay) {
+  if (!offset) return null; // the touch day itself has no stored open (see below)
+  const day = findDay(t, offset);
+  if (!day || day.open == null) return null;
+  const prevClose = offset === 1 ? t.close : findDay(t, offset - 1)?.close;
+  if (!prevClose) return null;
+  return ((day.open - prevClose) / prevClose) * 100;
+}
+
 function sortValue(t, key, viewDay, findDay, metric = "close") {
   // The per-day columns sort on whichever move is currently being scored, so
   // the ordering always matches the numbers actually on screen.
@@ -66,6 +85,7 @@ function sortValue(t, key, viewDay, findDay, metric = "close") {
   if (key === "_pct") return move(findDay(t, viewDay)) ?? null;
   if (key === "_high") return dayExtremePct(t, viewDay === 0 ? t : findDay(t, viewDay), "high");
   if (key === "_low") return dayExtremePct(t, viewDay === 0 ? t : findDay(t, viewDay), "low");
+  if (key === "_gap") return dayGapPct(t, viewDay, findDay);
   if (key.startsWith("offset:")) return move(findDay(t, Number(key.slice(7)))) ?? null;
   return null;
 }
@@ -151,6 +171,9 @@ const DEFAULT_FILTERS = {
   //   "down" — dipped below the touch close (low) / never got above it (high)
   low: "all",           // "all" | "up" | "down"
   high: "all",          // "all" | "up" | "down"
+  // Same view-only reasoning: the viewed day's OPEN, against the close of the
+  // trading day right before it, is only known once that day has happened.
+  gap: { on: false, direction: "above", pct: 1 },
   // Pre-trade: cap bucket is visible before placing the trade.
   // Multi-select: ["all"] means no filter; any specific buckets narrow to those.
   cap: ["all"],         // ["all"] | subset of ["large","mid","small","unknown"]
@@ -257,6 +280,7 @@ function countActiveFilters(f, runBefore, runAfter) {
   if (f.outcome !== "all") n++;
   if (f.low !== "all") n++;
   if (f.high !== "all") n++;
+  if (f.gap.on) n++;
   if (!f.cap.includes("all")) n++;
   if (!f.dow.includes("all")) n++;
   if (!f.w52.includes("all")) n++;
@@ -528,9 +552,15 @@ function BandStudy({ singleDate }) {
         if (v == null) return false;
         if (key === "up" ? v < 0 : v >= 0) return false;
       }
+      if (filters.gap.on) {
+        const g = dayGapPct(t, viewDay, findDay);
+        if (g == null) return false;
+        const ok = filters.gap.direction === "above" ? g >= filters.gap.pct : g <= -filters.gap.pct;
+        if (!ok) return false;
+      }
       return true;
     });
-  }, [predictionTouches, filters.outcome, filters.low, filters.high]);
+  }, [predictionTouches, filters.outcome, filters.low, filters.high, filters.gap, viewDay]);
 
   // Plain-English list of whichever view-only filters are on, for the note that
   // explains why the row count and the panel count disagree.
@@ -539,8 +569,13 @@ function BandStudy({ singleDate }) {
     if (filters.outcome !== "all") out.push(filters.outcome === "up" ? "the risers" : "the fallers");
     if (filters.low !== "all") out.push(filters.low === "up" ? "days whose low stayed above the touch close" : "days whose low dipped below the touch close");
     if (filters.high !== "all") out.push(filters.high === "up" ? "days that traded above the touch close" : "days that never got above the touch close");
+    if (filters.gap.on) {
+      out.push(filters.gap.direction === "above"
+        ? `days that opened ${filters.gap.pct}%+ above the previous close`
+        : `days that opened ${filters.gap.pct}%+ below the previous close`);
+    }
     return out;
-  }, [filters.outcome, filters.low, filters.high]);
+  }, [filters.outcome, filters.low, filters.high, filters.gap]);
 
   // Only what the circuit-lock rule ITSELF removed — a touch that the
   // before-move filter would have dropped anyway is not counted here, so the
@@ -757,6 +792,7 @@ function BandStudy({ singleDate }) {
           onSort={toggleSort}
           onClearSort={() => setSort({ key: null, dir: null })}
           viewDay={viewDay}
+          findDay={findDay}
         />
       )}
     </>
@@ -1243,11 +1279,12 @@ function Stat({ label, value, cls = "" }) {
 function FilterDrawer({
   filters, onChange, onClose, runBeforeDays, runFollowDays,
   upCount, downCount, rows, predictionRows, caps, w52, viewBefore, matchCount, predictionCount, totalCount,
-  sort, onSort, onClearSort, viewDay,
+  sort, onSort, onClearSort, viewDay, findDay,
 }) {
   const [tab, setTab] = useState("window");
   const set = (patch) => onChange({ ...filters, ...patch });
   const setBM = (patch) => onChange({ ...filters, beforeMove: { ...filters.beforeMove, ...patch } });
+  const setGap = (patch) => onChange({ ...filters, gap: { ...filters.gap, ...patch } });
   const bm = filters.beforeMove;
 
   // Live preview of what the current before-move settings would keep, plus how
@@ -1272,6 +1309,7 @@ function FilterDrawer({
     ["_pct", `${viewDay === 0 ? "Viewed day" : dayLabel(viewDay)} change`],
     ["_low", "Low"],
     ["_high", "High"],
+    ["_gap", "Gap"],
   ];
 
   // Day -1 needs day -2's close, so the furthest tracked day can never be
@@ -1289,6 +1327,7 @@ function FilterDrawer({
     ["w52", "52-week range", !filters.w52.includes("all")],
     ["outcome", "Outcome", filters.outcome !== "all"],
     ["lowhigh", "Low / High", filters.low !== "all" || filters.high !== "all"],
+    ["gap", "Gap", filters.gap.on],
     ["sort", "Sort by", !!sort.key],
   ];
 
@@ -1627,6 +1666,61 @@ function FilterDrawer({
                     <strong>Like Outcome, these only hide table rows — the panel above is untouched.</strong> Where the
                     low and high landed is part of what happened after the touch, so scoring a set chosen by it would
                     just report that choice back.
+                  </p>
+                </>
+              );
+            })()}
+
+            {tab === "gap" && (() => {
+              const gap = filters.gap;
+              const onTouchDay = viewDay === 0;
+              const matchCount = onTouchDay ? 0 : predictionRows.filter((t) => {
+                const g = dayGapPct(t, viewDay, findDay);
+                if (g == null) return false;
+                return gap.direction === "above" ? g >= gap.pct : g <= -gap.pct;
+              }).length;
+              return (
+                <>
+                  {onTouchDay && (
+                    <div className="inline-error" style={{ marginTop: 0, marginBottom: 12 }}>
+                      The touch day has no stored open price — it was only ever tracked by its high, low and close.
+                      Pick a single day (not "All") to use this filter.
+                    </div>
+                  )}
+                  <Radio name="gapon" value={false} cur={gap.on} onPick={() => setGap({ on: false })}
+                    label="None" note={`all ${predictionRows.length}`} />
+                  <Radio name="gapon" value={true} cur={gap.on} onPick={() => setGap({ on: true })}
+                    label="Filter by the opening gap" note={`${matchCount} match`} />
+
+                  <div style={{ opacity: gap.on ? 1 : 0.45, pointerEvents: gap.on ? "auto" : "none", marginTop: 14 }}>
+                    <div className="row">
+                      <label>
+                        Direction
+                        <select value={gap.direction} onChange={(e) => setGap({ direction: e.target.value })}>
+                          <option value="above">Opened above</option>
+                          <option value="below">Opened below</option>
+                        </select>
+                      </label>
+                      <label>
+                        By at least %
+                        <input type="number" min="0" step="0.5" value={gap.pct}
+                          onChange={(e) => setGap({ pct: Math.max(0, Number(e.target.value)) })} />
+                      </label>
+                    </div>
+                  </div>
+
+                  <p className="drawer-note">
+                    {dayLabel(viewDay)}'s own <strong>open</strong>, against the <strong>close of the trading day
+                    right before it</strong> — for Day +1 that "before" is the touch day's own close, exactly "froze
+                    at 20% on the touch day, then opened above that close the next morning". A threshold of{" "}
+                    <strong>{gap.pct}</strong> keeps {gap.direction === "above"
+                      ? `opens ${gap.pct}% or more above`
+                      : `opens ${gap.pct}% or more below`} the prior close.
+                  </p>
+                  <p className="drawer-note">
+                    <strong>Like Outcome and Low/High, this only hides table rows.</strong> The panel above is
+                    untouched — the gap on a day after the touch is part of what happened after it, so scoring a set
+                    chosen by it would just report that choice back.
                   </p>
                 </>
               );
