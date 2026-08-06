@@ -348,7 +348,6 @@ function BandStudy({ singleDate }) {
   const [beforeDays, setBeforeDays] = useState(singleDate ? 5 : 0);
   // Which day-offset the results table is showing. 0 means "all tracked days".
   const [viewDay, setViewDay] = useState(1);
-  const [selectedTouch, setSelectedTouch] = useState(null);
   // Everything the drawer controls, in one object so "Clear all" is a single
   // reset and the active-filter count is easy to derive. All of it narrows what
   // is DISPLAYED from the scan already in memory — none of it re-scans.
@@ -393,7 +392,6 @@ function BandStudy({ singleDate }) {
       const d = await api.getBandStudyRun(id);
       setRun(d);
       setViewDay(1); // a freshly loaded run always starts on day 1
-      setSelectedTouch(null);
       setSort({ key: null, dir: null }); // and on the table's normal (unsorted) order
       // Filters deliberately SURVIVE a run change, clamped to what the new run
       // tracked. That turns the Past runs list into out-of-sample testing: set a
@@ -767,8 +765,6 @@ function BandStudy({ singleDate }) {
           onViewDay={setViewDay}
           followDays={viewAfter}
           beforeDays={viewBefore}
-          selectedTouch={selectedTouch}
-          onSelectTouch={setSelectedTouch}
           findDay={findDay}
           onOpenFilters={() => setDrawerOpen(true)}
           activeFilterCount={activeFilterCount}
@@ -808,7 +804,7 @@ function BandStudy({ singleDate }) {
 function BandStudyResult({
   run, touches, predictionTouches, totalCount, viewOnlyFilters, beforeMoveOn, lockedExcluded, metric, onMetric,
   onSort, sortArrow, viewDay, onViewDay, followDays, beforeDays,
-  selectedTouch, onSelectTouch, findDay, onOpenFilters, activeFilterCount, caps, w52,
+  findDay, onOpenFilters, activeFilterCount, caps, w52,
 }) {
   const flaggedCount = touches.filter((t) => t.corporate_action_suspected).length;
   const dayOffsets = Array.from({ length: followDays }, (_, i) => i + 1);
@@ -956,11 +952,6 @@ function BandStudyResult({
         </p>
       )}
 
-      {/* The per-touch graph — click any stock below to see it here. */}
-      {selectedTouch && (
-        <TouchBarChart touch={selectedTouch} beforeOffsets={beforeOffsets} dayOffsets={dayOffsets} findDay={findDay} metric={metric} onClose={() => onSelectTouch(null)} />
-      )}
-
       {/* The report: every tracked day, up and down kept separate. Cumulative
           from the touch day's close, so "day +3" answers "where is it now, 3
           days on?" and "day -3" answers "where was it, 3 days before?" */}
@@ -1056,10 +1047,6 @@ function BandStudyResult({
                 ))
               ) : (
                 <>
-                  <th className="num sortable" onClick={() => onSort("_day_date")}>Date{sortArrow("_day_date")}</th>
-                  <th className="num sortable" onClick={() => onSort("_pct")}>
-                    {dayLabel(viewDay)} change{sortArrow("_pct")}
-                  </th>
                   <th className="num sortable" onClick={() => onSort("_low")} title="Lowest the stock traded that day, measured from the touch day's close">
                     Low{sortArrow("_low")}
                   </th>
@@ -1075,16 +1062,20 @@ function BandStudyResult({
                   <th></th>
                 </>
               )}
-              <th>Graph</th>
             </tr>
           </thead>
           <tbody>
             {touches.map((t) => {
-              const isSelected = selectedTouch && selectedTouch.symbol === t.symbol && selectedTouch.date === t.date;
               return (
                 <tr key={`${t.symbol}-${t.date}`} style={t.corporate_action_suspected ? { opacity: 0.55 } : undefined}>
                   <td>
-                    <strong>{t.symbol}</strong>
+                    <Link
+                      to={`/backtest/chart/${encodeURIComponent(t.symbol)}?date=${encodeURIComponent(t.date)}`}
+                      target="_blank"
+                      title="Open the candlestick chart in a new tab"
+                    >
+                      <strong>{t.symbol}</strong>
+                    </Link>
                     {t.corporate_action_suspected && (
                       <span className="tag warn" title="Bhavcopy vs Yahoo-adjusted price disagree sharply — likely a split/bonus, not a real move">
                         ⚠ possible split/bonus
@@ -1117,7 +1108,10 @@ function BandStudyResult({
                   </td>
                   <td className="num">{t.date}</td>
                   <td className={`num ${t.direction === "up" ? "pos" : "neg"}`}>{pct(t.touch_pct)}</td>
-                  <td className="num">{pct(t.close_pct)}</td>
+                  <td className="num">
+                    <div>{pct(t.close_pct)}</div>
+                    <div className="muted" style={{ fontSize: 11 }}>{rupees(t.close)}</div>
+                  </td>
 
                   {showingAll ? (
                     allOffsets.map((n) => {
@@ -1135,15 +1129,13 @@ function BandStudyResult({
                     })
                   ) : (
                     <>
-                      <td className="num muted">{t._day?.date ?? "—"}</td>
-                      <td className={`num ${t._pct != null ? (t._pct >= 0 ? "pos" : "neg") : ""}`}>
-                        {t._pct != null ? pct(t._pct) : "—"}
-                      </td>
                       {[["low", "_low"], ["high", "_high"]].map(([which]) => {
                         const v = dayExtremePct(t, t._day, which);
+                        const raw = t._day?.[which];
                         return (
                           <td key={which} className={`num ${v == null ? "" : v >= 0 ? "pos" : "neg"}`}>
-                            {v != null ? pct(v) : "—"}
+                            <div>{v != null ? pct(v) : "—"}</div>
+                            {raw != null && <div className="muted" style={{ fontSize: 11 }}>{rupees(raw)}</div>}
                           </td>
                         );
                       })}
@@ -1171,23 +1163,6 @@ function BandStudyResult({
                       </td>
                     </>
                   )}
-                  <td style={{ display: "flex", gap: 6 }}>
-                    <button
-                      type="button"
-                      className={`small ${isSelected ? "primary" : ""}`}
-                      onClick={() => onSelectTouch(isSelected ? null : t)}
-                    >
-                      {isSelected ? "Hide" : "Chart"}
-                    </button>
-                    <Link
-                      to={`/backtest/chart/${encodeURIComponent(t.symbol)}?date=${encodeURIComponent(t.date)}`}
-                      target="_blank"
-                      className="small"
-                      title="Open full candlestick chart in a new tab"
-                    >
-                      Candles ↗
-                    </Link>
-                  </td>
                 </tr>
               );
             })}
@@ -1195,94 +1170,6 @@ function BandStudyResult({
         </table>
       </section>
     </>
-  );
-}
-
-// A neat before/touch/after bar chart for one stock's move around its spike —
-// self-contained inline SVG so it stays theme-aware with zero extra deps.
-function TouchBarChart({ touch, beforeOffsets, dayOffsets, findDay, metric, onClose }) {
-  const points = useMemo(() => {
-    const move = (d) => (d == null ? null : metric === "intraday" ? d.open_close_pct : d.pct_from_touch);
-    const bar = (n, label) => {
-      const d = findDay(touch, n);
-      return { offset: n, label, date: d?.date ?? null, pct: move(d) };
-    };
-    const before = beforeOffsets.map((n) => bar(n, `D${n}`));
-    // The touch bar is that session's own open->close either way — it is the
-    // spike itself, so "cumulative from the touch" would always be zero.
-    const touchPoint = { offset: 0, label: "Touch", date: touch.date, pct: touch.close_pct, isTouch: true };
-    const after = dayOffsets.map((n) => bar(n, `D+${n}`));
-    return [...before, touchPoint, ...after];
-  }, [touch, beforeOffsets, dayOffsets, findDay, metric]);
-
-  const values = points.map((p) => p.pct).filter((v) => v != null);
-  const maxAbs = Math.max(1, ...values.map((v) => Math.abs(v)));
-  const barW = 30, gap = 8, chartH = 170, padTop = 20, padBottom = 46;
-  const width = points.length * (barW + gap) + gap;
-  const height = chartH + padTop + padBottom;
-  const zeroY = padTop + chartH / 2;
-  const scale = (chartH / 2 - 10) / maxAbs;
-
-  return (
-    <div className="card">
-      <div className="card-title">
-        <span>
-          {touch.symbol} <span className="muted" style={{ fontWeight: 400 }}>{touch.name}</span> — before/after the{" "}
-          {touch.date} touch ({touch.touch_pct >= 0 ? "+" : ""}{touch.touch_pct}%)
-        </span>
-        <button type="button" className="small" onClick={onClose}>Close</button>
-      </div>
-      <div style={{ overflowX: "auto" }}>
-        <svg viewBox={`0 0 ${width} ${height}`} width={width} height={height} style={{ display: "block" }}>
-          <line x1={0} y1={zeroY} x2={width} y2={zeroY} stroke="var(--line)" strokeWidth="1" />
-          {points.map((p, i) => {
-            const x = gap + i * (barW + gap);
-            if (p.pct == null) {
-              return (
-                <text key={i} x={x + barW / 2} y={zeroY + 4} textAnchor="middle" fontSize="10" fill="var(--muted)">—</text>
-              );
-            }
-            const h = Math.max(Math.abs(p.pct) * scale, 1);
-            const y = p.pct >= 0 ? zeroY - h : zeroY;
-            const color = p.isTouch ? "var(--accent)" : p.pct >= 0 ? "var(--pos)" : "var(--neg)";
-            return (
-              <g key={i}>
-                <rect x={x} y={y} width={barW} height={h} fill={color} rx="2" />
-                <text
-                  x={x + barW / 2}
-                  y={p.pct >= 0 ? y - 4 : y + h + 12}
-                  textAnchor="middle"
-                  fontSize="10"
-                  fontWeight={p.isTouch ? 700 : 400}
-                  fill="var(--text)"
-                >
-                  {p.pct >= 0 ? "+" : ""}{p.pct.toFixed(1)}%
-                </text>
-              </g>
-            );
-          })}
-          {points.map((p, i) => {
-            const x = gap + i * (barW + gap);
-            return (
-              <g key={`label-${i}`}>
-                <text x={x + barW / 2} y={height - 30} textAnchor="middle" fontSize="10" fontWeight={p.isTouch ? 700 : 400} fill="var(--muted)">
-                  {p.label}
-                </text>
-                <text x={x + barW / 2} y={height - 16} textAnchor="middle" fontSize="9" fill="var(--muted)">
-                  {p.date ?? ""}
-                </text>
-              </g>
-            );
-          })}
-        </svg>
-      </div>
-      <p className="muted" style={{ fontSize: 12, margin: "8px 0 0" }}>
-        {metric === "intraday"
-          ? "Before/after bars are each session's own open→close move — what an intraday trade in that session would have captured."
-          : "Before/after bars are cumulative % move from the touch day's close (offset 0)."}{" "}
-        The touch bar itself (black) is that session's own open→close move — what the spike actually looked like.
-      </p>
-    </div>
   );
 }
 
