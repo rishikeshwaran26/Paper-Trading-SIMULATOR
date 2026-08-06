@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { api } from "../api.js";
 import { Loading, ErrorBanner } from "../components/Status.jsx";
-import { pct } from "../format.js";
+import { pct, rupees } from "../format.js";
 
 // BACKTEST PAGE — does the "20% spike reverts" idea actually hold up?
 //
@@ -73,7 +73,7 @@ function dayGapPct(t, offset, findDay) {
   return ((day.open - prevClose) / prevClose) * 100;
 }
 
-function sortValue(t, key, viewDay, findDay, metric = "close") {
+function sortValue(t, key, viewDay, findDay, metric = "close", w52 = {}) {
   // The per-day columns sort on whichever move is currently being scored, so
   // the ordering always matches the numbers actually on screen.
   const move = (d) => (d == null ? null : metric === "intraday" ? d.open_close_pct : d.pct_from_touch);
@@ -86,6 +86,8 @@ function sortValue(t, key, viewDay, findDay, metric = "close") {
   if (key === "_high") return dayExtremePct(t, viewDay === 0 ? t : findDay(t, viewDay), "high");
   if (key === "_low") return dayExtremePct(t, viewDay === 0 ? t : findDay(t, viewDay), "low");
   if (key === "_gap") return dayGapPct(t, viewDay, findDay);
+  if (key === "_w52_low") return w52[w52Key(t)]?.w52_low ?? null;
+  if (key === "_w52_high") return w52[w52Key(t)]?.w52_high ?? null;
   if (key.startsWith("offset:")) return move(findDay(t, Number(key.slice(7)))) ?? null;
   return null;
 }
@@ -505,15 +507,15 @@ function BandStudy({ singleDate }) {
     if (!key || !dir) return rows; // "normal": whatever order the backend returned
     const mul = dir === "asc" ? 1 : -1;
     return [...rows].sort((a, b) => {
-      const av = sortValue(a, key, viewDay, findDay, metric);
-      const bv = sortValue(b, key, viewDay, findDay, metric);
+      const av = sortValue(a, key, viewDay, findDay, metric, w52);
+      const bv = sortValue(b, key, viewDay, findDay, metric, w52);
       if (av == null && bv == null) return 0;
       if (av == null) return 1;  // rows with no data this far out (or this column) sink to the bottom
       if (bv == null) return -1;
       if (typeof av === "string" && typeof bv === "string") return av.localeCompare(bv) * mul;
       return (av - bv) * mul;
     });
-  }, [rows, sort, viewDay, metric]);
+  }, [rows, sort, viewDay, metric, w52]);
 
   // How many tracked days the drawer is currently letting through. Capped by
   // what the run actually scanned — you can narrow the view, never widen it
@@ -1064,6 +1066,12 @@ function BandStudyResult({
                   <th className="num sortable" onClick={() => onSort("_high")} title="Highest the stock traded that day, measured from the touch day's close">
                     High{sortArrow("_high")}
                   </th>
+                  <th className="num sortable" onClick={() => onSort("_w52_low")} title="The 52-week low as of the touch date, using only bars before it">
+                    52w Low{sortArrow("_w52_low")}
+                  </th>
+                  <th className="num sortable" onClick={() => onSort("_w52_high")} title="The 52-week high as of the touch date, using only bars before it">
+                    52w High{sortArrow("_w52_high")}
+                  </th>
                   <th></th>
                 </>
               )}
@@ -1139,6 +1147,19 @@ function BandStudyResult({
                           </td>
                         );
                       })}
+                      {(() => {
+                        const b = w52[w52Key(t)];
+                        const bars = b?.bucket === "unknown" ? 0 : b?.bars;
+                        const title = b?.w52_low != null
+                          ? `From ${bars} trading day${bars === 1 ? "" : "s"} before the touch`
+                          : "Not enough prior history in the cached bhavcopy";
+                        return (
+                          <>
+                            <td className="num muted" title={title}>{b?.w52_low != null ? rupees(b.w52_low) : "—"}</td>
+                            <td className="num muted" title={title}>{b?.w52_high != null ? rupees(b.w52_high) : "—"}</td>
+                          </>
+                        );
+                      })()}
                       <td>
                         {t._pct == null ? (
                           <span className="chip muted">no data</span>
@@ -1314,6 +1335,8 @@ function FilterDrawer({
     ["_low", "Low"],
     ["_high", "High"],
     ["_gap", "Gap"],
+    ["_w52_low", "52w Low"],
+    ["_w52_high", "52w High"],
   ];
 
   // Day -1 needs day -2's close, so the furthest tracked day can never be
