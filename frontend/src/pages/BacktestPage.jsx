@@ -151,9 +151,13 @@ const DEFAULT_FILTERS = {
   // allowed to drive the prediction panel.
   viewBefore: null,
   viewAfter: null,
-  // Defaults to excluding circuit-locked touches: they were untradeable, so
-  // leaving them in overstates a strategy nobody could have run.
-  tradeable: "exclude_locked", // "exclude_locked" | "all" | "only_locked"
+  // Defaults to "all" — every scan otherwise silently opened already filtered
+  // to non-frozen touches, and the panel is scored off this same set, so the
+  // very first numbers you see after a scan were quietly narrowed before you
+  // ever touched the drawer. Switch to "exclude_locked" by hand when you want
+  // the honest-strategy read: a circuit-locked touch had no sellers, so
+  // leaving it in overstates a strategy nobody could have run.
+  tradeable: "all", // "exclude_locked" | "all" | "only_locked"
   beforeMove: {
     on: false,
     mode: "cumulative", // "cumulative" | "single"
@@ -276,7 +280,7 @@ function summarizeOffset(touches, offset, direction = "up", metric = "close") {
 function countActiveFilters(f, runBefore, runAfter) {
   let n = 0;
   if (f.beforeMove.on) n++;
-  if (f.tradeable !== "exclude_locked") n++; // the default is itself a filter
+  if (f.tradeable !== "all") n++;
   if (f.outcome !== "all") n++;
   if (f.low !== "all") n++;
   if (f.high !== "all") n++;
@@ -1321,7 +1325,7 @@ function FilterDrawer({
   const cats = [
     ["window", "Window", filters.viewBefore != null || filters.viewAfter != null],
     ["before", "Before-move", bm.on],
-    ["tradeable", "Circuit freeze", filters.tradeable !== "exclude_locked"],
+    ["tradeable", "Circuit freeze", filters.tradeable !== "all"],
     ["cap", "Market cap", !filters.cap.includes("all")],
     ["dow", "Day of week", !filters.dow.includes("all")],
     ["w52", "52-week range", !filters.w52.includes("all")],
