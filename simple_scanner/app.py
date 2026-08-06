@@ -129,9 +129,17 @@ def scan():
             if prev_close <= 0:
                 continue
             hit = {"symbol": sym, "name": names.get(sym, ""), "date": d.isoformat()}
-            close_pct = (close - prev_close) / prev_close * 100
+            # Rounded BEFORE the band test, not after, and the rounded value is
+            # what gets compared and reported. A stock locked at the +20%
+            # circuit is mathematically exactly 20%, but in binary floating
+            # point (732.60 - 610.50) / 610.50 * 100 lands on 20.000000000000004
+            # — a hair outside a 19–20 band, so it vanished from the scan while
+            # a neighbour at the same circuit stayed. That silently dropped 43%
+            # of every exact-20% touch, which is most of what this tool is for.
+            # The main app already compares the rounded value; this matches it.
+            close_pct = round((close - prev_close) / prev_close * 100, 2)
 
-            up_pct = (high - prev_close) / prev_close * 100
+            up_pct = round((high - prev_close) / prev_close * 100, 2)
             if band_low <= up_pct <= band_high:
                 # Closed at (within a whisker of) the day's high it touched:
                 # almost always means it FROZE there — locked at the upper
@@ -139,14 +147,14 @@ def scan():
                 # sellers to trade into. |up_pct - close_pct| <= 0.15 is the
                 # same tolerance the main app uses for this.
                 frozen = abs(up_pct - close_pct) <= 0.15
-                up_hits.append({**hit, "pct": round(up_pct, 2), "close_pct": round(close_pct, 2), "frozen": frozen})
+                up_hits.append({**hit, "pct": up_pct, "close_pct": close_pct, "frozen": frozen})
 
-            down_pct = (low - prev_close) / prev_close * 100
+            down_pct = round((low - prev_close) / prev_close * 100, 2)
             if -band_high <= down_pct <= -band_low:
                 # Same idea on the way down — closed at its low, frozen at the
                 # lower circuit.
                 frozen = abs(down_pct - close_pct) <= 0.15
-                down_hits.append({**hit, "pct": round(down_pct, 2), "close_pct": round(close_pct, 2), "frozen": frozen})
+                down_hits.append({**hit, "pct": down_pct, "close_pct": close_pct, "frozen": frozen})
         d += timedelta(days=1)
 
     # Biggest move first within each list — the touches most worth a second
