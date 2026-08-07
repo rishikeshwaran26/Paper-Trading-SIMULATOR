@@ -29,6 +29,7 @@ multi-user a data change rather than a rewrite.
 from __future__ import annotations
 
 import os
+import threading
 from datetime import date
 
 from flask import Blueprint, current_app, g, jsonify, request
@@ -743,20 +744,46 @@ def band_study_run_week52(run_id: int):
 
 
 # --- trading-day calendar (the nav's month grid) -----------------------------
+# Months currently being fetched in the background, so two requests for the
+# same uncached month (e.g. a page reload before the first warm-up finishes)
+# don't both fire off 31 redundant NSE calls at once.
+_warming_months: set[tuple[str, int, int]] = set()
+_warming_lock = threading.Lock()
+
+
+def _warm_calendar_cache(cache_dir: str, missing_dates: list) -> None:
+    key = (cache_dir, missing_dates[0].year, missing_dates[0].month)
+    with _warming_lock:
+        if key in _warming_months:
+            return
+        _warming_months.add(key)
+
+    def worker():
+        from engine.bhavcopy import fetch_day
+
+        try:
+            for d in missing_dates:
+                fetch_day(cache_dir, d)  # caches a hit or an .empty marker
+        finally:
+            with _warming_lock:
+                _warming_months.discard(key)
+
+    threading.Thread(target=worker, daemon=True, name="calendar-warm").start()
+
+
 @bp.get("/calendar/month")
 @require_auth
 def calendar_month():
-    """Every day of one calendar month, labelled trading / closed / future.
-
-    Backed by the same bhavcopy cache every scan already fills — `fetch_day`
-    caches an empty marker for a real non-trading day, not just a hit for a
-    real one, so a month already touched by any scan renders instantly and a
-    month that hasn't returns each day's true status, not "unknown", at the
-    cost of one request per day the first time.
+    """Every day of one calendar month, labelled trading / closed / future /
+    unknown — answered ENTIRELY from the local bhavcopy cache, never a live
+    NSE request. A trading calendar spans at most a few thousand days total
+    (250-ish a year), trivial to keep on disk once fetched, so there is no
+    reason a request should ever wait on the network: a day this cache
+    hasn't seen yet is reported "unknown" and a background fetch is kicked
+    off to fill it in for next time, rather than blocking this response on
+    up to 31 sequential NSE round trips.
     """
     import calendar as _calendar
-
-    from engine.bhavcopy import fetch_day
 
     # Query-string values, so always strings — req_int is for JSON body ints
     # and would reject these outright, hence the manual int() here.
@@ -773,26 +800,34 @@ def calendar_month():
     _, days_in_month = _calendar.monthrange(year, month)
 
     days = []
+    missing = []
     for day_num in range(1, days_in_month + 1):
         d = date(year, month, day_num)
         if d > today:
             status = "future"
+        elif d.weekday() >= 5:
+            # Saturday/Sunday: NSE has never traded on a weekend, ever — this
+            # needs no cache lookup and no fetch to know for certain, so it
+            # never becomes "unknown" and never queues a warm-up fetch that
+            # could only ever come back empty.
+            status = "closed"
         else:
-            # A cached day is checked by file existence, not by asking
-            # fetch_day to parse the whole CSV back into rows — a month
-            # already scanned would otherwise re-parse ~2,000 rows per day
-            # just to answer yes/no. Only a genuinely uncached date pays for
-            # the real fetch (which also caches it, first time only).
+            # File existence only — never asks fetch_day to parse a cached
+            # CSV back into rows just to answer yes/no, and never fetches.
             path = os.path.join(cache_dir, f"{d.isoformat()}.csv")
             if os.path.exists(path):
                 status = "trading"
             elif os.path.exists(path + ".empty"):
                 status = "closed"
             else:
-                status = "trading" if fetch_day(cache_dir, d) else "closed"
+                status = "unknown"
+                missing.append(d)
         days.append({"date": d.isoformat(), "status": status})
 
-    return jsonify({"year": year, "month": month, "days": days})
+    if missing:
+        _warm_calendar_cache(cache_dir, missing)
+
+    return jsonify({"year": year, "month": month, "days": days, "warming": bool(missing)})
 
 
 # --- single-symbol quote (used by the trade form's market-price prefill) ----

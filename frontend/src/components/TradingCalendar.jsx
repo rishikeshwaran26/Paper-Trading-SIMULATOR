@@ -7,13 +7,23 @@ const MONTH_NAMES = [
 ];
 const WEEKDAY_LETTERS = ["S", "M", "T", "W", "T", "F", "S"];
 
+// How long to wait before re-checking a month the server is still warming up
+// in the background. Short enough that a small handful of missing days (a
+// scan interrupted mid-range, say) resolves almost immediately; a whole
+// uncached month still lands within a few polls rather than one long wait.
+const WARM_POLL_MS = 2500;
+const WARM_POLL_MAX = 12; // ~30s ceiling, then just show what's cached so far
+
 // Trading-day calendar for the nav — circled days are confirmed NSE trading
-// days, everything else (weekend, holiday, or not-yet-happened) sits plain
-// and light so the circle means one thing: the market was actually open.
+// days, everything else (weekend, holiday, not-yet-happened, or not checked
+// yet) sits plain and light so the circle means one thing: the market was
+// actually open.
 //
-// Backed by the bhavcopy cache every scan already fills, so a month already
-// touched anywhere in the app renders instantly; a month that hasn't costs
-// one request per not-yet-cached day, the first time only.
+// The backend answers ENTIRELY from its local bhavcopy cache — it never
+// blocks a request on a live NSE fetch. A day it hasn't seen yet comes back
+// "unknown" immediately, while the server fetches it in the background; this
+// component polls quietly until nothing is left unknown, so the calendar
+// starts fast and fills itself in rather than making you wait up front.
 export default function TradingCalendar() {
   const today = new Date();
   // year and month as ONE number (Jan year 0 = 0), not two separate pieces of
@@ -33,8 +43,9 @@ export default function TradingCalendar() {
   // heading — and at the new month's weekday offset, so they landed on the
   // wrong dates entirely.
   const [data, setData] = useState(null); // { key, days } | null
-  // Keyed by "YYYY-M" — a month already fetched this session never asks the
-  // server again, so paging back and forth is instant after the first visit.
+  // Only a fully-settled month (no "unknown" days left) is cached — a month
+  // still warming up must be asked about again, or a later visit would keep
+  // showing the same gaps forever.
   const cache = useRef({});
 
   useEffect(() => {
@@ -43,17 +54,34 @@ export default function TradingCalendar() {
       return;
     }
     let alive = true;
+    let attempt = 0;
+    let timer = null;
     setData(null); // clear immediately, so nothing stale is ever on screen
-    api
-      .calendarMonth(year, month)
-      .then((d) => {
-        if (!alive) return;
-        cache.current[key] = d.days;
-        setData({ key, days: d.days });
-      })
-      .catch(() => alive && setData({ key, days: [] }));
+
+    function load() {
+      api
+        .calendarMonth(year, month)
+        .then((d) => {
+          if (!alive) return;
+          setData({ key, days: d.days });
+          if (!d.warming) {
+            cache.current[key] = d.days;
+            return;
+          }
+          attempt += 1;
+          if (attempt < WARM_POLL_MAX) {
+            timer = setTimeout(load, WARM_POLL_MS);
+          } else {
+            cache.current[key] = d.days; // stop polling; show what landed
+          }
+        })
+        .catch(() => alive && setData({ key, days: [] }));
+    }
+    load();
+
     return () => {
       alive = false;
+      if (timer) clearTimeout(timer);
     };
   }, [key, year, month]);
 
@@ -86,6 +114,7 @@ export default function TradingCalendar() {
                   className={`trading-calendar-day ${d.status === "trading" ? "on" : ""}`}
                   title={d.status === "trading" ? `${d.date} — NSE trading day`
                        : d.status === "future" ? `${d.date} — hasn't happened yet`
+                       : d.status === "unknown" ? `${d.date} — checking…`
                        : `${d.date} — weekend or holiday`}
                 >
                   {Number(d.date.slice(-2))}
