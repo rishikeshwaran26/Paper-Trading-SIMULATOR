@@ -269,25 +269,36 @@ function PeriodPanel({ periodId, onChanged, onDeleted }) {
   );
 }
 
-// Notes + total count, saved on blur (not per keystroke) — same "type, then it
-// saves quietly" feel as the trade journal's review notes.
+// Notes + total count. Saves two ways: on blur (a safety net — switch months
+// or navigate away mid-thought and it's still captured) AND an explicit Save
+// button, because relying on blur alone gives no feedback that anything
+// happened — it silently worked, which reads as silently broken. Both paths
+// go through the same save(), so both show the same "✓ Saved at 14:32:07"
+// confirmation, and the button is disabled once there's nothing new to save.
 function NotesAndCount({ period, onChanged }) {
   const [notes, setNotes] = useState(period.notes);
   const [totalCount, setTotalCount] = useState(period.total_count ?? "");
   const [saving, setSaving] = useState(false);
+  const [dirty, setDirty] = useState(false);
+  const [savedAt, setSavedAt] = useState(null);
 
   useEffect(() => {
     setNotes(period.notes);
     setTotalCount(period.total_count ?? "");
+    setDirty(false);
+    setSavedAt(null);
   }, [period.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
   async function save() {
+    if (!dirty) return; // blur after a save-with-nothing-changed shouldn't re-fire
     setSaving(true);
     try {
       await api.updateResearchPeriod(period.id, {
         notes,
         total_count: totalCount === "" ? null : Number(totalCount),
       });
+      setDirty(false);
+      setSavedAt(new Date());
       onChanged?.();
     } finally {
       setSaving(false);
@@ -295,29 +306,38 @@ function NotesAndCount({ period, onChanged }) {
   }
 
   return (
-    <div className="row" style={{ alignItems: "start" }}>
-      <label style={{ flex: 2 }}>
+    <>
+      <label style={{ display: "block", marginBottom: 14 }}>
         Notes / remarks
         <textarea
-          rows={3}
+          rows={7}
           value={notes}
-          onChange={(e) => setNotes(e.target.value)}
+          onChange={(e) => { setNotes(e.target.value); setDirty(true); }}
           onBlur={save}
           placeholder="How the idea did this month, what you'd change…"
+          style={{ fontSize: 14, lineHeight: 1.55, resize: "vertical" }}
         />
       </label>
-      <label style={{ flex: 1 }}>
-        Total count {saving && <span className="muted">saving…</span>}
-        <input
-          type="number"
-          min="0"
-          value={totalCount}
-          onChange={(e) => setTotalCount(e.target.value)}
-          onBlur={save}
-          placeholder="e.g. 36"
-        />
-      </label>
-    </div>
+      <div className="row" style={{ alignItems: "end", gap: 14 }}>
+        <label style={{ flex: "0 0 160px" }}>
+          Total count
+          <input
+            type="number"
+            min="0"
+            value={totalCount}
+            onChange={(e) => { setTotalCount(e.target.value); setDirty(true); }}
+            onBlur={save}
+            placeholder="e.g. 36"
+          />
+        </label>
+        <button type="button" className="primary" style={{ marginTop: 0 }} onClick={save} disabled={saving || !dirty}>
+          {saving ? "Saving…" : "Save"}
+        </button>
+        <span className="muted" style={{ fontSize: 12.5 }}>
+          {saving ? "" : dirty ? "Unsaved changes" : savedAt ? `✓ Saved at ${savedAt.toLocaleTimeString()}` : ""}
+        </span>
+      </div>
+    </>
   );
 }
 
