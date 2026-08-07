@@ -15,6 +15,8 @@ Then open: http://localhost:5050
 from __future__ import annotations
 
 import os
+import re
+import shutil
 import sys
 from datetime import date, timedelta
 
@@ -40,6 +42,14 @@ _DATA_DIR = os.path.join(os.path.dirname(_ROOT), "data")
 CACHE_DIR = os.path.join(_DATA_DIR, "bhavcopy_cache")
 UNIVERSE_CACHE = os.path.join(_DATA_DIR, "nse_universe.csv")
 os.makedirs(CACHE_DIR, exist_ok=True)
+
+# A standing copy of whichever bhavcopy file(s) the LAST scan actually used —
+# separate from CACHE_DIR (which every scan ever run keeps piling into) so
+# there's always exactly one place that shows "what this scan just touched",
+# cleared and refilled on every scan rather than accumulating forever.
+EXPORT_DIR = os.path.join(_ROOT, "scan_exports")
+os.makedirs(EXPORT_DIR, exist_ok=True)
+_EXPORT_NAME_RE = re.compile(r"^\d{4}-\d{2}-\d{2}\.csv$")
 
 MAX_RANGE_DAYS = 366  # a generous cap so a fat-fingered 10-year range can't hang the server
 
@@ -104,6 +114,7 @@ def scan():
     down_hits = []
     trading_days = 0
     missing_days = []
+    traded_dates = []  # every date that actually had a bhavcopy file, in order
 
     d = start
     while d <= end:
@@ -117,6 +128,7 @@ def scan():
             d += timedelta(days=1)
             continue
         trading_days += 1
+        traded_dates.append(d.isoformat())
         for row in rows:
             try:
                 sym = row["SYMBOL"].strip().upper()
@@ -171,6 +183,21 @@ def scan():
     for h in down_hits:
         h["cap"] = caps.get(h["symbol"], "unknown")
 
+    # Wipe last scan's copies and drop in this scan's, in date order — the
+    # folder always mirrors exactly the scan that just ran, never a history of
+    # every scan ever made. Copied rather than moved/symlinked: CACHE_DIR is
+    # shared with the main app, and this folder is meant to survive even if
+    # something there later gets cleaned up.
+    for old in os.listdir(EXPORT_DIR):
+        if _EXPORT_NAME_RE.match(old):
+            os.remove(os.path.join(EXPORT_DIR, old))
+    exported_files = []
+    for iso in traded_dates:
+        src = os.path.join(CACHE_DIR, f"{iso}.csv")
+        if os.path.exists(src):
+            shutil.copyfile(src, os.path.join(EXPORT_DIR, f"{iso}.csv"))
+            exported_files.append(f"{iso}.csv")
+
     return jsonify(
         up_count=len(up_hits),
         down_count=len(down_hits),
@@ -178,7 +205,31 @@ def scan():
         down_hits=down_hits,
         trading_days=trading_days,
         missing_days=len(missing_days),
+        exported_files=exported_files,
     )
+
+
+@app.get("/scan-exports/<fname>")
+def scan_export_file(fname: str):
+    """Serve one exported CSV inline, so "open" shows it in a new tab rather
+    than forcing a download. `fname` is checked against a strict YYYY-MM-DD.csv
+    pattern before touching the filesystem — it comes from the URL, and
+    send_from_directory only guards path traversal, not an arbitrary name."""
+    if not _EXPORT_NAME_RE.match(fname):
+        return jsonify(error="not found"), 404
+    return send_from_directory(EXPORT_DIR, fname, mimetype="text/csv")
+
+
+@app.post("/scan-exports/open-folder")
+def open_export_folder():
+    """Pop the export folder open in Windows Explorer. Only makes sense
+    because this app runs on the same machine as the person clicking the
+    button — it would be meaningless (and wrong) for a hosted deployment."""
+    try:
+        os.startfile(EXPORT_DIR)  # noqa: S606 — local-only tool, user's own click
+    except (AttributeError, OSError) as e:
+        return jsonify(error=f"could not open the folder: {e}"), 500
+    return jsonify(ok=True)
 
 
 if __name__ == "__main__":

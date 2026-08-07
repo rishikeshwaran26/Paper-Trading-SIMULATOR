@@ -49,6 +49,12 @@
   .meta { font-size: 12.5px; color: var(--muted); margin-top: 10px; text-align: center; }
   .err { color: var(--neg); font-size: 13px; margin-top: 10px; }
   .hint { font-size: 12px; color: var(--muted); margin: -8px 0 14px; }
+  .exports-list { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 14px; }
+  .exports-list a {
+    font-size: 12px; color: var(--text); background: #f4f4f5; border-radius: 6px;
+    padding: 4px 9px; text-decoration: none;
+  }
+  .exports-list a:hover { background: #e4e4e7; }
 
   .lists { display: flex; gap: 16px; margin-top: 16px; align-items: flex-start; }
   .lists > div { flex: 1; min-width: 0; }
@@ -178,6 +184,15 @@
     </div>
   </div>
   <div class="meta" id="meta"></div>
+
+  <div id="exportsWrap" style="display:none">
+    <label>
+      Bhavcopy file<span id="exportsPlural"></span> used by this scan
+      <button type="button" id="openFolderBtn" style="margin-left:8px">📁 Open folder</button>
+    </label>
+    <div id="exportsList"></div>
+    <p class="hint" id="exportsErr" style="display:none;color:var(--neg)"></p>
+  </div>
 
   <div class="controls" id="controls" style="display:none">
     <div>
@@ -447,6 +462,8 @@
     $("freezeFilterWrap").style.display = "none";
     $("dowFilterWrap").style.display = "none";
     $("meta").textContent = "";
+    $("exportsWrap").style.display = "none";
+    $("exportsErr").style.display = "none";
 
     const oneDay = dateMode === "single";
     const payload = {
@@ -481,6 +498,15 @@
         ? "No trading day in that selection — weekend, holiday, or NSE has not published it yet."
         : `${d.trading_days} trading day${d.trading_days === 1 ? "" : "s"} scanned`;
 
+      // The bhavcopy file(s) this scan just used — a fresh copy per scan, so
+      // this always shows exactly what fed the numbers above, nothing older.
+      const files = d.exported_files || [];
+      $("exportsPlural").textContent = files.length === 1 ? "" : "s";
+      $("exportsList").innerHTML = files
+        .map((f) => `<a href="/scan-exports/${encodeURIComponent(f)}" target="_blank">${f}</a>`)
+        .join("");
+      $("exportsWrap").style.display = files.length ? "block" : "none";
+
       lastUp = d.up_hits || [];
       lastDown = d.down_hits || [];
       $("sortBy").value = "pct";
@@ -499,6 +525,18 @@
     } finally {
       $("scanBtn").disabled = false;
       $("scanBtn").textContent = "Scan";
+    }
+  };
+
+  $("openFolderBtn").onclick = async () => {
+    $("exportsErr").style.display = "none";
+    try {
+      const r = await fetch("/scan-exports/open-folder", { method: "POST" });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || "could not open the folder");
+    } catch (e) {
+      $("exportsErr").textContent = e.message;
+      $("exportsErr").style.display = "block";
     }
   };
 </script>
