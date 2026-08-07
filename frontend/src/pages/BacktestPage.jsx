@@ -1053,6 +1053,9 @@ function BandStudyResult({
                 ))
               ) : (
                 <>
+                  <th className="num sortable" onClick={() => onSort("_gap")} title="This day's own open, against the close of the trading day right before it">
+                    Open{sortArrow("_gap")}
+                  </th>
                   <th className="num sortable" onClick={() => onSort("_low")} title="Lowest the stock traded that day, measured from the touch day's close">
                     Low{sortArrow("_low")}
                   </th>
@@ -1137,6 +1140,16 @@ function BandStudyResult({
                     })
                   ) : (
                     <>
+                      {(() => {
+                        const g = dayGapPct(t, viewDay, findDay);
+                        const openRaw = t._day?.open;
+                        return (
+                          <td className={`num ${g == null ? "" : g >= 0 ? "pos" : "neg"}`}>
+                            <div>{g != null ? pct(g) : "—"}</div>
+                            {openRaw != null && <div className="muted" style={{ fontSize: 11 }}>{rupees(openRaw)}</div>}
+                          </td>
+                        );
+                      })()}
                       {[["low", "_low"], ["high", "_high"]].map(([which]) => {
                         const v = dayExtremePct(t, t._day, which);
                         const raw = t._day?.[which];
@@ -1229,7 +1242,7 @@ function FilterDrawer({
     ["_pct", `${viewDay === 0 ? "Viewed day" : dayLabel(viewDay)} change`],
     ["_low", "Low"],
     ["_high", "High"],
-    ["_gap", "Gap"],
+    ["_gap", "Open"],
     ["_w52_low", "52w Low"],
     ["_w52_high", "52w High"],
   ];
