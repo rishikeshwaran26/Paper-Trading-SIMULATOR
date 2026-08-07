@@ -190,12 +190,25 @@ def scan():
     # something there later gets cleaned up.
     for old in os.listdir(EXPORT_DIR):
         if _EXPORT_NAME_RE.match(old):
-            os.remove(os.path.join(EXPORT_DIR, old))
+            try:
+                os.remove(os.path.join(EXPORT_DIR, old))
+            except OSError:
+                # Windows locks a file while Explorer/another process has it
+                # open (e.g. you had it open from the last scan) — that's not
+                # a reason to fail the whole scan. shutil.copyfile below can
+                # still overwrite an in-place file it couldn't delete; only a
+                # genuinely stale file from a date no longer in this scan
+                # would survive as clutter, which the next successful scan
+                # will clear.
+                pass
     exported_files = []
     for iso in traded_dates:
         src = os.path.join(CACHE_DIR, f"{iso}.csv")
         if os.path.exists(src):
-            shutil.copyfile(src, os.path.join(EXPORT_DIR, f"{iso}.csv"))
+            try:
+                shutil.copyfile(src, os.path.join(EXPORT_DIR, f"{iso}.csv"))
+            except OSError:
+                continue  # same lock story as above — skip, don't fail the scan
             exported_files.append(f"{iso}.csv")
 
     return jsonify(
