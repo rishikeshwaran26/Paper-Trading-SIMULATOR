@@ -218,6 +218,12 @@ function touchDow(t) {
   return String(new Date(t.date).getUTCDay());
 }
 
+const DOW_NAMES = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+// getUTCDay(), not getDay() — t.date is "YYYY-MM-DD", which the Date
+// constructor parses as UTC midnight, so reading it back with the local-time
+// getter can print the wrong weekday for anyone west of UTC.
+const dayName = (dateStr) => DOW_NAMES[new Date(dateStr).getUTCDay()];
+
 // Cohort stats at one day-offset, over whatever set of touches is passed in.
 // Mirrors engine.backtest._summarize_one_day: a touch with no data that far out
 // is excluded from `scored` rather than counted as a flat 0% — a missing day is
@@ -1106,7 +1112,9 @@ function BandStudyResult({
                     })()}
                     <div className="muted" style={{ fontSize: 12 }}>{t.name}</div>
                   </td>
-                  <td className="num">{t.date}</td>
+                  <td className="num">
+                    {t.date} <span className="muted">({dayName(t.date)})</span>
+                  </td>
                   <td className={`num ${t.direction === "up" ? "pos" : "neg"}`}>{pct(t.touch_pct)}</td>
                   <td className="num">
                     <div>{pct(t.close_pct)}</div>
