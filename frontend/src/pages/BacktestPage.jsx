@@ -1056,6 +1056,9 @@ function BandStudyResult({
                   <th className="num sortable" onClick={() => onSort("_gap")} title="This day's own open, against the close of the trading day right before it">
                     Open{sortArrow("_gap")}
                   </th>
+                  <th className="num sortable" onClick={() => onSort("_pct")} title="Where this day actually closed — cumulative move from the TOUCH day's close, not this day's own open-to-close">
+                    Close{sortArrow("_pct")}
+                  </th>
                   <th className="num sortable" onClick={() => onSort("_low")} title="Lowest the stock traded that day, measured from the touch day's close">
                     Low{sortArrow("_low")}
                   </th>
@@ -1150,6 +1153,10 @@ function BandStudyResult({
                           </td>
                         );
                       })()}
+                      <td className={`num ${t._pct == null ? "" : t._pct >= 0 ? "pos" : "neg"}`}>
+                        <div>{t._pct != null ? pct(t._pct) : "—"}</div>
+                        {t._day?.close != null && <div className="muted" style={{ fontSize: 11 }}>{rupees(t._day.close)}</div>}
+                      </td>
                       {[["low", "_low"], ["high", "_high"]].map(([which]) => {
                         const v = dayExtremePct(t, t._day, which);
                         const raw = t._day?.[which];
