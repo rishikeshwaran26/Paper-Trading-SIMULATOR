@@ -74,6 +74,11 @@ def _write_annotated_csv(src: str, dest: str) -> None:
     every row, not just the ones that matched a band. So opening the exported
     file shows the number you came here for already sitting in it, instead of
     the raw exchange file you'd have to do the maths on yourself.
+
+    Sorted by UP_PCT, biggest first — a raw bhavcopy is alphabetical by
+    symbol, which buries the whole point of opening this file. Rows with no
+    computable % (a bad PREV_CLOSE) sink to the bottom rather than breaking
+    the sort or landing at the top by accident.
     """
     with open(src, newline="", encoding="utf-8") as fh:
         rows = list(csv.DictReader(fh))
@@ -93,6 +98,7 @@ def _write_annotated_csv(src: str, dest: str) -> None:
         else:
             row["UP_PCT"] = ""
             row["DOWN_PCT"] = ""
+    rows.sort(key=lambda r: r["UP_PCT"] if r["UP_PCT"] != "" else float("-inf"), reverse=True)
     with open(dest, "w", newline="", encoding="utf-8") as fh:
         writer = csv.DictWriter(fh, fieldnames=fieldnames)
         writer.writeheader()
