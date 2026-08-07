@@ -74,11 +74,13 @@ h2 { font-size: 16px; font-weight: 700; letter-spacing: -.005em; margin: 0 0 10p
 button:focus-visible, a:focus-visible { outline-offset: 3px; }
 
 /* --- layout ---------------------------------------------------------------- */
+.topbar-wrap {
+  background: rgba(255, 255, 255, .8); backdrop-filter: blur(12px);
+  position: sticky; top: 0; z-index: 20; border-bottom: 1px solid var(--line);
+}
 .topbar {
   display: flex; align-items: center; justify-content: space-between;
-  padding: 12px 24px; border-bottom: 1px solid var(--line);
-  background: rgba(255, 255, 255, .8); backdrop-filter: blur(12px);
-  position: sticky; top: 0; z-index: 20;
+  padding: 12px 24px;
 }
 .brand { font-weight: 700; font-size: 17px; letter-spacing: -.01em; display: flex; align-items: center; }
 .topbar nav { display: flex; align-items: center; }
@@ -89,6 +91,33 @@ button:focus-visible, a:focus-visible { outline-offset: 3px; }
 }
 .topbar nav a:hover { color: var(--text); background: var(--panel-2); }
 .topbar nav a.active { color: #fff; background: var(--accent); }
+
+/* the always-visible trading-day calendar, tucked under the nav's right edge */
+.topbar-calendar-row { display: flex; justify-content: flex-end; padding: 0 24px 12px; }
+.trading-calendar { width: 200px; font-size: 12px; }
+.trading-calendar-head {
+  display: flex; align-items: center; justify-content: space-between;
+  font-weight: 600; margin-bottom: 6px; color: var(--muted);
+}
+.trading-calendar-head button {
+  background: none; padding: 0 6px; font-size: 14px; font-weight: 700;
+  color: var(--muted); border-radius: 4px;
+}
+.trading-calendar-head button:hover { color: var(--text); background: var(--panel-2); }
+.trading-calendar-grid {
+  display: grid; grid-template-columns: repeat(7, 1fr); gap: 2px; text-align: center;
+}
+.trading-calendar-dow { font-size: 10px; color: var(--muted-2); font-weight: 700; padding-bottom: 2px; }
+.trading-calendar-day {
+  display: flex; align-items: center; justify-content: center;
+  aspect-ratio: 1; border-radius: 999px; color: var(--muted-2);
+}
+/* the ONLY marked state: a confirmed NSE trading day. Everything else
+   (weekend, holiday, or not-yet-happened) stays exactly this plain. */
+.trading-calendar-day.on {
+  background: var(--accent); color: #fff; font-weight: 700;
+}
+.trading-calendar-loading { grid-column: 1 / -1; color: var(--muted-2); padding: 8px 0; text-align: center; }
 .content { max-width: 1120px; margin: 0 auto; padding: 28px 24px 40px; }
 .foot { max-width: 1120px; margin: 0 auto; padding: 8px 24px 32px; font-size: 12.5px; color: var(--muted-2); }
 .page { animation: fade .18s var(--ease); }

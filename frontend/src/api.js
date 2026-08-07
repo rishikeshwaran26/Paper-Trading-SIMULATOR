@@ -151,4 +151,7 @@ export const api = {
   getBandStudyRun: (id) => request(`/band-study/runs/${enc(id)}`),
   getBandStudyRunCaps: (id) => request(`/band-study/runs/${enc(id)}/caps`),
   getBandStudyRunWeek52: (id) => request(`/band-study/runs/${enc(id)}/week52`),
+
+  // trading-day calendar (nav widget)
+  calendarMonth: (year, month) => request(`/calendar/month?year=${year}&month=${month}`),
 };

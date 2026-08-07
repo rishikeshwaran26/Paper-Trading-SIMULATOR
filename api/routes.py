@@ -806,6 +806,59 @@ def band_study_run_week52(run_id: int):
     return jsonify({"week52": labels})
 
 
+# --- trading-day calendar (the nav's month grid) -----------------------------
+@bp.get("/calendar/month")
+@require_auth
+def calendar_month():
+    """Every day of one calendar month, labelled trading / closed / future.
+
+    Backed by the same bhavcopy cache every scan already fills — `fetch_day`
+    caches an empty marker for a real non-trading day, not just a hit for a
+    real one, so a month already touched by any scan renders instantly and a
+    month that hasn't returns each day's true status, not "unknown", at the
+    cost of one request per day the first time.
+    """
+    import calendar as _calendar
+
+    from engine.bhavcopy import fetch_day
+
+    # Query-string values, so always strings — req_int is for JSON body ints
+    # and would reject these outright, hence the manual int() here.
+    try:
+        year = int(request.args["year"])
+        month = int(request.args["month"])
+    except (KeyError, ValueError):
+        raise ApiError(400, "BadRequest", "year and month are required integers")
+    if not (1 <= month <= 12) or not (2000 <= year <= 2100):
+        raise ApiError(400, "BadRequest", "month must be 1-12, year a real year")
+
+    cache_dir = bhavcopy_cache_dir(current_app.config.get("DATA_ROOT", "data"))
+    today = date.today()
+    _, days_in_month = _calendar.monthrange(year, month)
+
+    days = []
+    for day_num in range(1, days_in_month + 1):
+        d = date(year, month, day_num)
+        if d > today:
+            status = "future"
+        else:
+            # A cached day is checked by file existence, not by asking
+            # fetch_day to parse the whole CSV back into rows — a month
+            # already scanned would otherwise re-parse ~2,000 rows per day
+            # just to answer yes/no. Only a genuinely uncached date pays for
+            # the real fetch (which also caches it, first time only).
+            path = os.path.join(cache_dir, f"{d.isoformat()}.csv")
+            if os.path.exists(path):
+                status = "trading"
+            elif os.path.exists(path + ".empty"):
+                status = "closed"
+            else:
+                status = "trading" if fetch_day(cache_dir, d) else "closed"
+        days.append({"date": d.isoformat(), "status": status})
+
+    return jsonify({"year": year, "month": month, "days": days})
+
+
 # --- single-symbol quote (used by the trade form's market-price prefill) ----
 @bp.get("/prices/quote/<symbol>")
 @require_auth
