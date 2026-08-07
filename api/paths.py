@@ -18,7 +18,6 @@ from engine.repository import (
     AlertRepository,
     JournalRepository,
     PriceRepository,
-    ResearchRepository,
     SnapshotRepository,
     SqlitePortfolioManager,
     TrackerRepository,
@@ -67,11 +66,6 @@ class UserData:
         """Hand-picked touches this user is following day by day. User-scoped
         on purpose: the scan is shared market data, the selection is personal."""
         return TrackerRepository(self.db_path, self.user_id)
-
-    def research(self) -> ResearchRepository:
-        """This user's trading-idea notebook. User-scoped: research is personal,
-        unlike the band-study scans it can pull rows in from."""
-        return ResearchRepository(self.db_path, self.user_id)
 
     def prices(self) -> PriceRepository:
         """Market data is SHARED across users — a price is a fact about the

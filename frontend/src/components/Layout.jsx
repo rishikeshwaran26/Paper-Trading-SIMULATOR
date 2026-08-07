@@ -27,7 +27,6 @@ export default function Layout({ children, user, onLogout }) {
             <NavLink to="/" end>Dashboard</NavLink>
             <NavLink to="/watchlist">Watchlist</NavLink>
             <NavLink to="/backtest">Backtest</NavLink>
-            <NavLink to="/research">Research</NavLink>
             {user && (
               <span className="user-chip">
                 {user.username}

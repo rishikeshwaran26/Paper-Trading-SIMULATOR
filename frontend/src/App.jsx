@@ -8,7 +8,6 @@ import JournalPage from "./pages/JournalPage.jsx";
 import AnalyticsPage from "./pages/AnalyticsPage.jsx";
 import WatchlistPage from "./pages/WatchlistPage.jsx";
 import BacktestPage from "./pages/BacktestPage.jsx";
-import ResearchPage from "./pages/ResearchPage.jsx";
 import StockChartPage from "./pages/StockChartPage.jsx";
 import LoginPage from "./pages/LoginPage.jsx";
 import { api } from "./api.js";
@@ -62,7 +61,6 @@ export default function App() {
           <Route path="/watchlist" element={<WatchlistPage />} />
           <Route path="/backtest" element={<BacktestPage />} />
           <Route path="/backtest/chart/:symbol" element={<StockChartPage />} />
-          <Route path="/research" element={<ResearchPage />} />
         </Routes>
       </Layout>
     </BrowserRouter>
