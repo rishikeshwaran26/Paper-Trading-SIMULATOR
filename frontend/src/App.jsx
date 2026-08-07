@@ -7,7 +7,6 @@ import StrategyDetailPage from "./pages/StrategyDetailPage.jsx";
 import JournalPage from "./pages/JournalPage.jsx";
 import AnalyticsPage from "./pages/AnalyticsPage.jsx";
 import WatchlistPage from "./pages/WatchlistPage.jsx";
-import ScreenerPage from "./pages/ScreenerPage.jsx";
 import BacktestPage from "./pages/BacktestPage.jsx";
 import StockChartPage from "./pages/StockChartPage.jsx";
 import LoginPage from "./pages/LoginPage.jsx";
@@ -60,7 +59,6 @@ export default function App() {
           <Route path="/strategies/:name/journal" element={<JournalPage />} />
           <Route path="/strategies/:name/analytics" element={<AnalyticsPage />} />
           <Route path="/watchlist" element={<WatchlistPage />} />
-          <Route path="/screener" element={<ScreenerPage />} />
           <Route path="/backtest" element={<BacktestPage />} />
           <Route path="/backtest/chart/:symbol" element={<StockChartPage />} />
         </Routes>

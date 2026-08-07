@@ -368,20 +368,10 @@ a.small:hover { background: var(--panel-hover); }
 .progress-track { height: 8px; border-radius: 999px; background: var(--panel-2); border: 1px solid var(--line); overflow: hidden; }
 .progress-fill { height: 100%; border-radius: 999px; transition: width .4s var(--ease); background: var(--accent); }
 
-/* --- screener filter bar --------------------------------------------------- */
-.screener-filters { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 16px; }
-.screener-filters select {
-  width: auto; padding: 7px 12px; border-radius: 999px; font-size: 13px; font-weight: 600;
-  background: var(--panel); border: 1px solid var(--line); color: var(--text); margin-top: 0;
-}
-.screener-filters select.filter-on { border-color: var(--accent); color: var(--text); background: var(--panel-2); }
-
-/* --- screener table -------------------------------------------------------- */
+/* --- data table (shared by Backtest's results table) ------------------------ */
 .screener-table th.sortable { cursor: pointer; user-select: none; white-space: nowrap; transition: color .12s var(--ease); }
 .screener-table th.sortable:hover { color: var(--text); }
 .screener-table td { vertical-align: middle; }
-.company-cell { display: flex; align-items: center; gap: 10px; }
-.company-name { font-size: 12px; max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); }
 .logo-avatar {
   display: inline-flex; align-items: center; justify-content: center;
   width: 30px; height: 30px; border-radius: 50%; color: #fff; font-weight: 700;

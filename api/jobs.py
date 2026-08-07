@@ -24,13 +24,11 @@ from __future__ import annotations
 import os
 import threading
 import time
-from datetime import datetime
 
-from engine.prices import IST, market_is_open
+from engine.prices import market_is_open
 from engine.repository import (
     AlertRepository,
     PriceRepository,
-    ScreenerRepository,
     SnapshotRepository,
     SqlitePortfolioManager,
 )
@@ -141,20 +139,12 @@ class BackgroundWorker:
         snapshot_interval: int = 300,
         price_interval: int = 60,
         source=None,
-        screener_service=None,
-        screener_data=None,
-        screener_cache_path: str | None = None,
     ):
         self.root = root
         self.alert_interval = alert_interval        # re-evaluate alerts every 15s
         self.snapshot_interval = snapshot_interval  # refresh today's row every 5min
         self.price_interval = price_interval        # pull live prices every 60s
         self.source = source
-        # Screener auto-run at market close. None data provider => feature off.
-        self.screener_service = screener_service
-        self.screener_data = screener_data
-        self.screener_cache_path = screener_cache_path
-        self.screener_check_interval = 300          # check the 3:30pm trigger every 5min
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._did_first_price_pull = False
@@ -164,7 +154,6 @@ class BackgroundWorker:
         last_alert = -1e9
         last_snapshot = -1e9
         last_prices = -1e9
-        last_screener_check = -1e9
         while not self._stop.is_set():
             now = time.monotonic()
 
@@ -183,33 +172,8 @@ class BackgroundWorker:
             if now - last_snapshot >= self.snapshot_interval:
                 capture_all_snapshots(self.root)
                 last_snapshot = now
-            if now - last_screener_check >= self.screener_check_interval:
-                self._maybe_run_screener()
-                last_screener_check = now
             # Wake up often enough to stay responsive to stop(), but not busy-loop.
             self._stop.wait(1.0)
-
-    def _maybe_run_screener(self) -> None:
-        """Auto-run the market screener once per day, shortly after NSE closes
-        (15:30 IST). We check every few minutes rather than firing on a precise
-        clock so a server started at any time still catches today's scan — and
-        done_today() makes it idempotent, so a restart can't double-scan."""
-        if not (self.screener_service and self.screener_data and self.screener_cache_path):
-            return
-        now_ist = datetime.now(IST)
-        if now_ist.weekday() >= 5:               # weekend — market shut
-            return
-        if now_ist.hour < 15 or (now_ist.hour == 15 and now_ist.minute < 30):
-            return                               # market not closed yet today
-        scan_date = now_ist.strftime("%Y-%m-%d")
-        repo = ScreenerRepository(db_file(self.root))
-        if repo.done_today(scan_date) or self.screener_service.is_running():
-            return
-        self.screener_service.start(
-            db_path=db_file(self.root),
-            cache_path=self.screener_cache_path,
-            data=self.screener_data,
-        )
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():

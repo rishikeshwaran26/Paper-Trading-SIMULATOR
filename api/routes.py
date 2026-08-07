@@ -45,8 +45,7 @@ from engine.journal import (
 )
 from engine.manager import DEFAULT_STARTING_CASH
 from engine.portfolio import Portfolio
-from engine.repository import BacktestRepository, BandStudyRepository, ScreenerRepository
-from engine.screener import BRACKETS
+from engine.repository import BacktestRepository, BandStudyRepository
 
 from .auth import require_auth
 from .errors import ApiError
@@ -58,7 +57,7 @@ from .validation import json_body, opt_str, opt_tags, req_int, req_num, req_str
 UNIVERSE_CACHE_FILE = "nse_universe.csv"
 
 
-def screener_cache_path(root: str) -> str:
+def universe_cache_path(root: str) -> str:
     return os.path.join(root, UNIVERSE_CACHE_FILE)
 
 
@@ -526,72 +525,9 @@ def remove_watchlist_symbol(watchlist_id: int, symbol: str):
     return jsonify({"removed": symbol.strip().upper()})
 
 
-# --- screener (whole-market daily movers) -----------------------------------
-# These read/write GLOBAL market data (the day's movers are the same for every
-# user), so they use a db-path-scoped ScreenerRepository rather than g.data.
-def _screener_repo() -> ScreenerRepository:
-    return ScreenerRepository(db_file(g.data.root))
-
-
-def _bracket_meta() -> list[dict]:
-    """Bracket keys + labels for the frontend to render section headers in the
-    right order without hardcoding them."""
-    return [
-        {"key": key, "label": label, "direction": direction, "low": lo}
-        for key, label, lo, _hi, direction in BRACKETS
-    ]
-
-
-@bp.get("/screener")
-@require_auth
-def get_screener():
-    """The latest completed scan (grouped by bracket) plus the live status of any
-    scan currently running. A brand-new install has no scan yet -> latest is
-    null and the UI shows a 'Scan now' prompt."""
-    service = current_app.config["SCREENER_SERVICE"]
-    latest = _screener_repo().latest_done()
-    return jsonify(
-        {
-            "latest": latest,               # {run, buckets} or null
-            "status": service.snapshot(),   # live progress of an in-flight scan
-            "brackets": _bracket_meta(),
-            "market_open": market_is_open(),
-        }
-    )
-
-
-@bp.post("/screener/scan")
-@require_auth
-def start_screener_scan():
-    """Trigger a fresh whole-market scan in the background. Returns 202 with the
-    initial status; the client then polls GET /screener/status."""
-    service = current_app.config["SCREENER_SERVICE"]
-    data = current_app.config.get("SCREENER_DATA")
-    if data is None:
-        raise ApiError(
-            503, "ScreenerUnavailable",
-            "the screener needs a live market data source; it's disabled in manual/offline mode",
-        )
-    started = service.start(
-        db_path=db_file(g.data.root),
-        cache_path=screener_cache_path(g.data.root),
-        data=data,
-    )
-    if not started:
-        raise ApiError(409, "ScanInProgress", "a scan is already running — check its status")
-    return jsonify({"started": True, "status": service.snapshot()}), 202
-
-
-@bp.get("/screener/status")
-@require_auth
-def screener_status():
-    """Live progress of the current/last scan (for the progress bar)."""
-    return jsonify(current_app.config["SCREENER_SERVICE"].snapshot())
-
-
 # --- backtest (does the mean-reversion idea actually hold up historically?) --
-# Same GLOBAL-market-data reasoning as the screener section above: a backtest of
-# a given past date is the same for every user, so it's shared, not per-user.
+# Same GLOBAL-market-data reasoning: a backtest of a given past date is the
+# same for every user, so it's shared, not per-user.
 def _backtest_repo() -> BacktestRepository:
     return BacktestRepository(db_file(g.data.root))
 
@@ -627,7 +563,7 @@ def start_backtest():
         )
     started = service.start(
         db_path=db_file(g.data.root),
-        cache_path=screener_cache_path(g.data.root),  # same NSE universe cache the screener uses
+        cache_path=universe_cache_path(g.data.root),
         data=data,
         target_date=target_date,
         direction=direction,
@@ -722,7 +658,7 @@ def start_band_study():
         raise ApiError(503, "BandStudyUnavailable", "the bhavcopy data source is not configured")
     started = service.start(
         db_path=db_file(g.data.root),
-        cache_path=screener_cache_path(g.data.root),
+        cache_path=universe_cache_path(g.data.root),
         data=data,
         start_date=start_date,
         end_date=end_date,

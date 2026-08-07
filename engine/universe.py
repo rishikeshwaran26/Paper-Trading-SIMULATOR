@@ -1,11 +1,13 @@
-"""The NSE stock universe — the full list of tradable symbols the screener scans.
+"""The NSE stock universe — the full list of tradable symbols a whole-exchange
+scan (band study, backtest) needs to cover.
 
 Why this is separate from symbols.py
 -------------------------------------
 symbols.py is a *curated* ~165-name list for search/autocomplete: hand-picked,
-bundled, always available offline. The screener needs the OPPOSITE — the whole
-exchange (~1,900 equities), because a big intraday mover is often a small/mid-cap
-you'd never think to type. So this module goes and gets the real, complete list.
+bundled, always available offline. A whole-exchange scan needs the OPPOSITE —
+the whole exchange (~1,900 equities), because a big intraday mover is often a
+small/mid-cap you'd never think to type. So this module goes and gets the
+real, complete list.
 
 Where the list comes from
 -------------------------
@@ -18,8 +20,8 @@ static file on an archive host and usually downloads fine — especially from an
 ordinary Indian residential connection, which is where you'll run the scan.
 
 We cache it to disk so every scan doesn't re-download it, refresh weekly, and if
-the download ever fails we fall back to the bundled symbols.py names so the
-screener still runs (just over fewer stocks) instead of breaking.
+the download ever fails we fall back to the bundled symbols.py names so a scan
+still runs (just over fewer stocks) instead of breaking.
 """
 
 from __future__ import annotations
@@ -50,7 +52,7 @@ _HEADERS = {
 
 def _bundled_fallback() -> list[dict]:
     """The curated symbols.py list, shaped like the CSV rows. Used when the live
-    download fails so the screener still has *something* to scan."""
+    download fails so a scan still has *something* to cover."""
     return [
         {"symbol": sym, "name": name, "series": "EQ"}
         for sym, name, _sector in symbol_directory.SYMBOLS
@@ -82,7 +84,7 @@ def _parse_csv(text: str) -> list[dict]:
 
 def _download() -> list[dict]:
     """Fetch and parse the live equity list. Returns [] on any failure so the
-    caller can fall back — a screener that scans the curated list beats a crash."""
+    caller can fall back — scanning the curated list beats a crash."""
     try:
         import requests  # yfinance already depends on it; lazy import keeps startup light
     except ImportError:

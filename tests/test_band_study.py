@@ -70,7 +70,7 @@ def test_below_band_excluded():
 
 def test_above_band_excluded():
     """25% high is above the 19-20 band -> not counted in THIS study, even
-    though it would qualify for the wider screener bracket."""
+    though it's a genuine big move by any wider threshold."""
     lead_in = [_bar(d, 100, 101, 99, 100) for d in _days(5)]
     spike = [_bar(date(2026, 1, 5), 100, 125, 99, 120)]
     bars = {"Z": lead_in + spike}

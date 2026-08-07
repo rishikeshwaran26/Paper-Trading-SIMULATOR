@@ -1,15 +1,15 @@
-"""Backtest: did today's screener idea actually work in the past?
+"""Backtest: does a big one-day spike actually tend to partially reverse?
 
 The question this answers
 --------------------------
-The screener finds stocks that moved 20%+ in a day, on the theory that such an
-extreme move tends to partially reverse (short-term reversal) — the basis for
-a mean-reversion short. That's a belief until you check it. This module checks
-it, using real historical prices instead of a fresh live scan:
+A stock that moves 20%+ in a day is often stretched, on the theory that such
+an extreme move tends to partially reverse (short-term reversal) — the basis
+for a mean-reversion short. That's a belief until you check it. This module
+checks it, using real historical prices instead of a fresh live scan:
 
   1. Pick a past calendar date.
   2. Find every stock that spiked (or dropped) by the threshold that day —
-     using yesterday's close vs that day's close, exactly like the screener.
+     using yesterday's close vs that day's close.
   3. For each one, walk FORWARD day by day for a fixed window and record three
      things: how much further it ran before turning (the peak), how many days
      until the first red (down) day, and how many days until it fully round-
@@ -22,10 +22,10 @@ live scan (which needs today's price, unknowable in advance), a past date's
 full price history — before AND after it — already exists on Yahoo Finance.
 No waiting required; we can test any date in the past right now.
 
-The "why" signal is intentionally narrower than the live screener's: news
-headlines are not available for arbitrary past dates (Yahoo's news endpoint
-only returns *current* headlines), so this module only uses volume and RSI at
-the spike — both computable from historical prices for any date.
+The "why" signal is intentionally narrow: news headlines are not available
+for arbitrary past dates (Yahoo's news endpoint only returns *current*
+headlines), so this module only uses volume and RSI at the spike — both
+computable from historical prices for any date.
 """
 
 from __future__ import annotations
@@ -35,7 +35,7 @@ from dataclasses import dataclass, field
 from datetime import date, timedelta
 from typing import Callable, Optional, Protocol
 
-from .screener import rsi as _rsi
+from .indicators import rsi as _rsi
 
 DEFAULT_THRESHOLD_PCT = 20.0
 DEFAULT_WINDOW_DAYS = 30  # trading days to watch after the spike
@@ -232,7 +232,7 @@ def run_backtest(
 ) -> BacktestResult:
     """Replay `target_date` across `rows` ([{symbol, name}]) and measure what
     happened next. `direction` is "up" (spikes, for the short thesis) or
-    "down" (drops, for a bounce thesis) — matches the screener's convention.
+    "down" (drops, for a bounce thesis).
     """
     lookback_start = target_date - timedelta(days=max(VOLUME_BASELINE_DAYS, RSI_LOOKBACK_DAYS) * 2 + 20)
     lookahead_end = target_date + _trading_days_needed(window_days)
@@ -1083,8 +1083,8 @@ def cross_check_corporate_actions(
 # --- the real (yfinance) data provider --------------------------------------
 class YFinanceBacktestData:
     """BacktestData backed by yfinance's historical daily bars — the same
-    library the live screener and price charts use, just queried over an
-    arbitrary past date range instead of "recent"."""
+    library the price charts use, just queried over an arbitrary past date
+    range instead of "recent"."""
 
     def __init__(self, exchange: str = "NS"):
         self.suffix = f".{exchange}"

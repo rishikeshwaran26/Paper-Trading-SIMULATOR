@@ -1,8 +1,8 @@
 """Where a touch sat against its own 52-week range, as of the day it happened.
 
-The screener's 52-week numbers are "as of today" — fine for a live scan, wrong
-for a backtest, where the only honest question is what the 52-week high was on
-the touch date itself, using nothing that had not happened yet.
+A naive "52-week high as of today" would be wrong for a backtest, where the
+only honest question is what the 52-week high was on the touch date itself,
+using nothing that had not happened yet.
 
 Rebuilt from the bhavcopy files already on disk, so no re-scan and no network:
 the whole exchange's daily high/low is cached there anyway, which is exactly
@@ -17,8 +17,7 @@ import os
 from datetime import date, timedelta
 from typing import Iterable, Optional, Sequence
 
-# Within this much of the extreme counts as "near" it. Matches the screener's
-# NEAR_EDGE so the two pages never disagree about what "near" means.
+# Within this much of the extreme counts as "near" it.
 NEAR_EDGE = 0.03
 
 # A 52-week level built from a handful of bars is not a 52-week level. Below

@@ -133,11 +133,6 @@ export const api = {
   priceHistory: (symbol, period = "1mo", interval = "1d") =>
     request(`/prices/${enc(symbol)}/history?period=${enc(period)}&interval=${enc(interval)}`),
 
-  // screener (whole-market daily movers)
-  screener: () => request("/screener"),
-  scanScreener: () => request("/screener/scan", { method: "POST" }),
-  screenerStatus: () => request("/screener/status"),
-
   // backtest (did a past spike actually revert?)
   runBacktest: (payload) => request("/backtest/run", { method: "POST", body: JSON.stringify(payload) }),
   backtestStatus: () => request("/backtest/status"),

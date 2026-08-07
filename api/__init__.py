@@ -24,7 +24,6 @@ from engine.backtest import YFinanceBacktestData
 from engine.bhavcopy import NSEBhavcopyData
 from engine.db import init_db
 from engine.prices import build_source
-from engine.screener import YFinanceScreenerData
 
 from .auth import load_or_create_secret
 from .paths import db_file
@@ -33,8 +32,7 @@ from .backtest_service import BacktestService
 from .band_study_service import BandStudyService
 from .errors import register_error_handlers
 from .jobs import BackgroundWorker, should_start_worker
-from .routes import bhavcopy_cache_dir, bp, screener_cache_path
-from .screener_service import ScreenerService
+from .routes import bhavcopy_cache_dir, bp
 
 DEFAULT_DATA_ROOT = "data"
 
@@ -74,15 +72,11 @@ def create_app(
     # "manual" means tests and offline use never touch the network.
     app.config["PRICE_SOURCE"] = None if mode == "manual" else build_source(mode, price_cache_ttl)
 
-    # Screener: one long-lived service (owns the scan thread + progress) and a
-    # market-data provider. In manual/offline mode the provider is None, which
-    # makes POST /screener/scan return 503 instead of hitting the network — tests
-    # inject a fake provider into SCREENER_DATA when they want to exercise a scan.
-    app.config["SCREENER_SERVICE"] = ScreenerService()
-    app.config["SCREENER_DATA"] = None if mode == "manual" else YFinanceScreenerData()
-
-    # Backtest: same async-service pattern as the screener, its own market-data
-    # provider (historical bars over an arbitrary date range, not "recent").
+    # Backtest: a long-lived service (owns the scan thread + progress) and its
+    # own market-data provider (historical bars over an arbitrary date range,
+    # not "recent"). In manual/offline mode the provider is None, which makes
+    # POST /backtest/run return 503 instead of hitting the network — tests
+    # inject a fake provider into BACKTEST_DATA when they want to exercise a run.
     app.config["BACKTEST_SERVICE"] = BacktestService()
     app.config["BACKTEST_DATA"] = None if mode == "manual" else YFinanceBacktestData()
 
@@ -115,9 +109,6 @@ def create_app(
             snapshot_interval,
             price_interval,
             source=app.config["PRICE_SOURCE"],
-            screener_service=app.config["SCREENER_SERVICE"],
-            screener_data=app.config["SCREENER_DATA"],
-            screener_cache_path=screener_cache_path(data_root),
         )
         worker.start()
         app.worker = worker
@@ -163,9 +154,6 @@ def create_app(
                     "DELETE /watchlists/<id>",
                     "POST   /watchlists/<id>/symbols",
                     "DELETE /watchlists/<id>/symbols/<symbol>",
-                    "GET    /screener",
-                    "POST   /screener/scan",
-                    "GET    /screener/status",
                     "POST   /backtest/run",
                     "GET    /backtest/status",
                     "GET    /backtest/runs",

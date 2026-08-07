@@ -165,61 +165,10 @@ CREATE TABLE IF NOT EXISTS prices (
     updated_at TEXT NOT NULL
 );
 
--- Screener runs: one row per whole-market scan. Like prices, this is MARKET
--- data (the day's movers are the same for everyone) so it is NOT user-scoped —
--- any user's scan populates it and every user reads the same latest result.
-CREATE TABLE IF NOT EXISTS screener_runs (
-    id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    scan_date       TEXT NOT NULL,            -- YYYY-MM-DD (IST) the scan is "for"
-    started_at      TEXT NOT NULL,
-    finished_at     TEXT,
-    status          TEXT NOT NULL,            -- running | done | error
-    universe_count  INTEGER NOT NULL DEFAULT 0,
-    scanned_count   INTEGER NOT NULL DEFAULT 0,
-    mover_count     INTEGER NOT NULL DEFAULT 0,
-    source          TEXT NOT NULL DEFAULT '', -- how the universe was obtained
-    error           TEXT
-);
-CREATE INDEX IF NOT EXISTS idx_screener_runs_date ON screener_runs(scan_date);
-
--- One row per qualifying mover within a run. Denormalised on purpose: a scan is
--- written once and read as a whole, so the enrichment (52w context, news,
--- reasons) rides along as columns / JSON rather than in join tables.
-CREATE TABLE IF NOT EXISTS screener_movers (
-    run_id          INTEGER NOT NULL REFERENCES screener_runs(id) ON DELETE CASCADE,
-    symbol          TEXT    NOT NULL,
-    name            TEXT    NOT NULL DEFAULT '',
-    price           REAL    NOT NULL,
-    prev_close      REAL    NOT NULL,
-    pct_change      REAL    NOT NULL,
-    volume          INTEGER NOT NULL DEFAULT 0,
-    avg_volume      INTEGER NOT NULL DEFAULT 0,
-    vol_ratio       REAL    NOT NULL DEFAULT 0,
-    vol_diff_1w_pct REAL,
-    bracket         TEXT    NOT NULL,            -- up_5_10 | up_10_15 | ... | down_15_plus
-    direction       TEXT    NOT NULL,            -- up | down
-    week52_high     REAL,
-    week52_low      REAL,
-    week52_pct      REAL,                        -- position in 52w range, 0–100
-    near_high       INTEGER NOT NULL DEFAULT 0,  -- 0/1
-    near_low        INTEGER NOT NULL DEFAULT 0,
-    rsi             REAL,
-    macd_bullish    INTEGER,                     -- 0/1/NULL
-    macd_hist       REAL,
-    spark           TEXT    NOT NULL DEFAULT '[]',  -- JSON list of recent closes
-    results_recent  INTEGER NOT NULL DEFAULT 0,
-    results_date    TEXT,
-    news            TEXT    NOT NULL DEFAULT '[]',
-    reasons         TEXT    NOT NULL DEFAULT '[]',
-    PRIMARY KEY (run_id, symbol)
-);
-CREATE INDEX IF NOT EXISTS idx_screener_movers_run ON screener_movers(run_id);
-
 -- Backtest runs: replay a PAST date's whole-market movers and measure what
--- happened afterward, using history that already exists — unlike screener_runs
--- (today's live scan), a backtest_run can be re-created any time since it only
--- reads historical prices. Shared market data, not user-scoped, same as prices
--- and screener_runs.
+-- happened afterward, using history that already exists — it can be
+-- re-created any time since it only reads historical prices. Shared market
+-- data, not user-scoped, same as prices.
 CREATE TABLE IF NOT EXISTS backtest_runs (
     id             INTEGER PRIMARY KEY AUTOINCREMENT,
     target_date    TEXT NOT NULL,            -- YYYY-MM-DD being replayed
@@ -266,7 +215,7 @@ CREATE INDEX IF NOT EXISTS idx_backtest_movers_run ON backtest_movers(run_id);
 -- Band-touch studies: Phase-1 of the mean-reversion research — a tight %
 -- band (e.g. 19-20%) over a date range, one row per (touch_date, symbol), plus
 -- what its very next trading day did. Shared market data, same reasoning as
--- screener_runs/backtest_runs.
+-- backtest_runs.
 CREATE TABLE IF NOT EXISTS band_study_runs (
     id             INTEGER PRIMARY KEY AUTOINCREMENT,
     start_date     TEXT NOT NULL,
@@ -369,20 +318,7 @@ CREATE TABLE IF NOT EXISTS tracked_touches (
 CREATE INDEX IF NOT EXISTS idx_tracked_user ON tracked_touches(user_id, touch_date);
 """
 
-# Columns added to screener_movers after its first release. init_db ALTERs them
-# in for existing databases (SQLite has no "ADD COLUMN IF NOT EXISTS").
-_SCREENER_MOVER_ADDED_COLUMNS = [
-    ("vol_diff_1w_pct", "REAL"),
-    ("week52_pct", "REAL"),
-    ("rsi", "REAL"),
-    ("macd_bullish", "INTEGER"),
-    ("macd_hist", "REAL"),
-    ("spark", "TEXT NOT NULL DEFAULT '[]'"),
-    ("results_recent", "INTEGER NOT NULL DEFAULT 0"),
-    ("results_date", "TEXT"),
-]
-
-# Same idea for backtest_movers: columns added after its first release.
+# Columns added to backtest_movers after its first release.
 _BACKTEST_MOVER_ADDED_COLUMNS = [
     ("spark", "TEXT NOT NULL DEFAULT '[]'"),
 ]
@@ -474,7 +410,6 @@ def init_db(db_path: str) -> None:
                 (str(SCHEMA_VERSION),),
             )
         _migrate_legacy_watchlist(conn)
-        _migrate_added_columns(conn, "screener_movers", _SCREENER_MOVER_ADDED_COLUMNS)
         _migrate_added_columns(conn, "backtest_movers", _BACKTEST_MOVER_ADDED_COLUMNS)
         _migrate_added_columns(conn, "backtest_runs", _MISSING_SYMBOLS_COLUMNS)
         _migrate_added_columns(conn, "band_study_runs", _MISSING_SYMBOLS_COLUMNS)

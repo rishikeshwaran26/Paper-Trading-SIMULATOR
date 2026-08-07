@@ -1,10 +1,9 @@
 """Runs a backtest asynchronously and reports live progress.
 
-Same shape as ScreenerService, for the same reason: replaying the whole
-exchange over a date range still means a few dozen batched Yahoo Finance
-calls, which takes real seconds and must not block an HTTP request. One
-long-lived BacktestService per app owns a single worker thread and the
-transient progress state; the finished result is persisted via
+Replaying the whole exchange over a date range still means a few dozen
+batched Yahoo Finance calls, which takes real seconds and must not block an
+HTTP request. One long-lived BacktestService per app owns a single worker
+thread and the transient progress state; the finished result is persisted via
 BacktestRepository so it survives past the moment the run ends.
 
     POST /backtest/run     -> service.start()   (returns immediately, 202)
