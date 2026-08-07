@@ -26,37 +26,40 @@ export default function TradingCalendar() {
   const year = Math.floor(monthIndex / 12);
   const month = (monthIndex % 12) + 1; // 1-12
 
-  const [days, setDays] = useState(null);
-  const [loading, setLoading] = useState(true);
+  const key = `${year}-${month}`;
+  // The loaded days are stored WITH the month they belong to, and rendered
+  // only when that matches the month on screen. Holding them alone let a
+  // slow fetch paint the previous month's circles under the new month's
+  // heading — and at the new month's weekday offset, so they landed on the
+  // wrong dates entirely.
+  const [data, setData] = useState(null); // { key, days } | null
   // Keyed by "YYYY-M" — a month already fetched this session never asks the
   // server again, so paging back and forth is instant after the first visit.
   const cache = useRef({});
 
   useEffect(() => {
-    const key = `${year}-${month}`;
     if (cache.current[key]) {
-      setDays(cache.current[key]);
-      setLoading(false);
+      setData({ key, days: cache.current[key] });
       return;
     }
     let alive = true;
-    setLoading(true);
+    setData(null); // clear immediately, so nothing stale is ever on screen
     api
       .calendarMonth(year, month)
       .then((d) => {
         if (!alive) return;
         cache.current[key] = d.days;
-        setDays(d.days);
+        setData({ key, days: d.days });
       })
-      .catch(() => alive && setDays(null))
-      .finally(() => alive && setLoading(false));
+      .catch(() => alive && setData({ key, days: [] }));
     return () => {
       alive = false;
     };
-  }, [year, month]);
+  }, [key, year, month]);
 
   const shift = (delta) => setMonthIndex((i) => i + delta);
 
+  const days = data && data.key === key ? data.days : null;
   // Leading blanks so day 1 lands under its real weekday column.
   const firstWeekday = new Date(Date.UTC(year, month - 1, 1)).getUTCDay();
   const cells = days ? [...Array(firstWeekday).fill(null), ...days] : [];
@@ -72,7 +75,7 @@ export default function TradingCalendar() {
         {WEEKDAY_LETTERS.map((l, i) => (
           <span key={i} className="trading-calendar-dow">{l}</span>
         ))}
-        {loading && !days
+        {days == null
           ? <span className="trading-calendar-loading">loading…</span>
           : cells.map((d, i) =>
               d == null ? (

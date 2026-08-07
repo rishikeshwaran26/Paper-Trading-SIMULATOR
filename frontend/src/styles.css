@@ -92,12 +92,19 @@ button:focus-visible, a:focus-visible { outline-offset: 3px; }
 .topbar nav a:hover { color: var(--text); background: var(--panel-2); }
 .topbar nav a.active { color: #fff; background: var(--accent); }
 
-/* the always-visible trading-day calendar, tucked under the nav's right edge */
-.topbar-calendar-row { display: flex; justify-content: flex-end; padding: 0 24px 12px; }
-.trading-calendar { width: 200px; font-size: 12px; }
+/* The always-visible trading-day calendar. Floated OUT of the header's flow
+   (absolute, hanging just below it) rather than sitting in it: in flow it
+   stretched the sticky bar into a tall white band across the whole page,
+   pushing every page's content down by its full height. */
+.topbar-calendar-row { position: absolute; top: 100%; right: 24px; margin-top: 8px; }
+.trading-calendar {
+  width: 172px; font-size: 11px;
+  background: var(--panel); border: 1px solid var(--line);
+  border-radius: var(--radius); box-shadow: var(--shadow); padding: 8px 10px 10px;
+}
 .trading-calendar-head {
   display: flex; align-items: center; justify-content: space-between;
-  font-weight: 600; margin-bottom: 6px; color: var(--muted);
+  font-weight: 600; margin-bottom: 4px; color: var(--muted);
 }
 .trading-calendar-head button {
   background: none; padding: 0 6px; font-size: 14px; font-weight: 700;
