@@ -149,4 +149,30 @@ export const api = {
 
   // trading-day calendar (nav widget)
   calendarMonth: (year, month) => request(`/calendar/month?year=${year}&month=${month}`),
+
+  // research (trading-idea notebook: idea -> year -> month)
+  listResearchIdeas: () => request("/research/ideas"),
+  createResearchIdea: (name) => request("/research/ideas", { method: "POST", body: JSON.stringify({ name }) }),
+  deleteResearchIdea: (id) => request(`/research/ideas/${enc(id)}`, { method: "DELETE" }),
+  addResearchChecklistItem: (ideaId, text) =>
+    request(`/research/ideas/${enc(ideaId)}/checklist`, { method: "POST", body: JSON.stringify({ text }) }),
+  deleteResearchChecklistItem: (itemId) => request(`/research/checklist/${enc(itemId)}`, { method: "DELETE" }),
+  createResearchPeriod: (ideaId, year, month) =>
+    request(`/research/ideas/${enc(ideaId)}/periods`, { method: "POST", body: JSON.stringify({ year, month }) }),
+  getResearchPeriod: (id) => request(`/research/periods/${enc(id)}`),
+  deleteResearchPeriod: (id) => request(`/research/periods/${enc(id)}`, { method: "DELETE" }),
+  updateResearchPeriod: (id, payload) =>
+    request(`/research/periods/${enc(id)}`, { method: "PUT", body: JSON.stringify(payload) }),
+  addResearchRow: (periodId, payload) =>
+    request(`/research/periods/${enc(periodId)}/rows`, { method: "POST", body: JSON.stringify(payload) }),
+  attachResearchRun: (periodId, runId) =>
+    request(`/research/periods/${enc(periodId)}/attach-run/${enc(runId)}`, { method: "POST" }),
+  updateResearchRow: (rowId, payload) =>
+    request(`/research/rows/${enc(rowId)}`, { method: "PUT", body: JSON.stringify(payload) }),
+  deleteResearchRow: (rowId) => request(`/research/rows/${enc(rowId)}`, { method: "DELETE" }),
+  setResearchCheck: (periodId, itemId, done) =>
+    request(`/research/periods/${enc(periodId)}/checklist/${enc(itemId)}`, {
+      method: "PUT",
+      body: JSON.stringify({ done }),
+    }),
 };

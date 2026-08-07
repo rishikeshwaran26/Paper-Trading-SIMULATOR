@@ -316,6 +316,75 @@ CREATE TABLE IF NOT EXISTS tracked_touches (
     UNIQUE (user_id, symbol, touch_date)
 );
 CREATE INDEX IF NOT EXISTS idx_tracked_user ON tracked_touches(user_id, touch_date);
+
+-- Research: a user's own trading-idea notebook, organized idea -> year ->
+-- month. Nothing here is shared market data — it's personal notes — so
+-- everything is user-scoped like watchlists: the idea carries user_id, and
+-- everything else hangs off idea_id (the repository always checks idea
+-- ownership before touching a period/row/checklist item).
+--
+-- "Year" is not its own row: a period's year/month are just columns, so
+-- creating a month under a new year needs no separate "create year" step —
+-- the tree groups periods by year on read.
+CREATE TABLE IF NOT EXISTS research_ideas (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id    TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    name       TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_research_ideas_user ON research_ideas(user_id);
+
+-- A reusable checklist template for one idea. Every month under it shares the
+-- same list of items — only the DONE state (research_period_checks) differs
+-- per month, so adding an item later shows up (unchecked) on old months too.
+CREATE TABLE IF NOT EXISTS research_checklist_items (
+    id       INTEGER PRIMARY KEY AUTOINCREMENT,
+    idea_id  INTEGER NOT NULL REFERENCES research_ideas(id) ON DELETE CASCADE,
+    text     TEXT NOT NULL,
+    position INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_research_checklist_idea ON research_checklist_items(idea_id);
+
+-- One row per (idea, calendar month) actually opened for research.
+-- total_count is typed by hand on purpose (the user's own tally, not a
+-- re-derived number) — see the "i do it myself manually" answer this was
+-- built from.
+CREATE TABLE IF NOT EXISTS research_periods (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    idea_id     INTEGER NOT NULL REFERENCES research_ideas(id) ON DELETE CASCADE,
+    year        INTEGER NOT NULL,
+    month       INTEGER NOT NULL,           -- 1-12
+    notes       TEXT NOT NULL DEFAULT '',
+    total_count INTEGER,
+    created_at  TEXT NOT NULL,
+    UNIQUE (idea_id, year, month)
+);
+CREATE INDEX IF NOT EXISTS idx_research_periods_idea ON research_periods(idea_id);
+
+-- One stock tracked for that month — typed by hand, or copied in from an
+-- attached Backtest run (source_run_id records which; NULL means typed).
+-- Copied rather than kept as a live reference: the source run can be
+-- re-scanned or deleted later, and a research row should survive that.
+CREATE TABLE IF NOT EXISTS research_rows (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    period_id     INTEGER NOT NULL REFERENCES research_periods(id) ON DELETE CASCADE,
+    symbol        TEXT NOT NULL,
+    touch_date    TEXT,
+    pct           REAL,
+    remark        TEXT NOT NULL DEFAULT '',
+    source_run_id INTEGER,
+    created_at    TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_research_rows_period ON research_rows(period_id);
+
+-- Which checklist items are ticked for one month. Absent row = not done, so
+-- ticking a NEW item on an old month is just one INSERT, never a backfill.
+CREATE TABLE IF NOT EXISTS research_period_checks (
+    period_id INTEGER NOT NULL REFERENCES research_periods(id) ON DELETE CASCADE,
+    item_id   INTEGER NOT NULL REFERENCES research_checklist_items(id) ON DELETE CASCADE,
+    done      INTEGER NOT NULL DEFAULT 1,
+    PRIMARY KEY (period_id, item_id)
+);
 """
 
 # Columns added to backtest_movers after its first release.

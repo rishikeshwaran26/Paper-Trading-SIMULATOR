@@ -975,3 +975,302 @@ class TrackerRepository:
             "refreshed_at": r["refreshed_at"],
             "created_at": r["created_at"],
         }
+
+
+# --- research (trading-idea notebook) -----------------------------------------
+class ResearchRepository:
+    """A user's own trading-idea notebook: idea -> year -> month.
+
+    Every method below a given idea/period/row/checklist-item id confirms it
+    actually belongs to this user first (same principle as WatchlistRepository)
+    — ids are plain sequential integers, so without that check one user could
+    poke at another user's notebook by guessing an id.
+    """
+
+    def __init__(self, db_path: str, user_id: str):
+        self.db_path = db_path
+        self.user_id = user_id
+
+    # --- ownership checks, each one join short of the thing it's guarding ----
+    def _owns_idea(self, conn, idea_id: int) -> bool:
+        row = conn.execute(
+            "SELECT 1 FROM research_ideas WHERE id = ? AND user_id = ?",
+            (idea_id, self.user_id),
+        ).fetchone()
+        return row is not None
+
+    def _period_idea_id(self, conn, period_id: int) -> Optional[int]:
+        """The owning idea_id if this period belongs to this user, else None —
+        one query that answers both "does it exist" and "is it mine"."""
+        row = conn.execute(
+            """SELECT p.idea_id FROM research_periods p
+               JOIN research_ideas i ON i.id = p.idea_id
+               WHERE p.id = ? AND i.user_id = ?""",
+            (period_id, self.user_id),
+        ).fetchone()
+        return row["idea_id"] if row else None
+
+    def _row_period_id(self, conn, row_id: int) -> Optional[int]:
+        row = conn.execute(
+            """SELECT r.period_id FROM research_rows r
+               JOIN research_periods p ON p.id = r.period_id
+               JOIN research_ideas i ON i.id = p.idea_id
+               WHERE r.id = ? AND i.user_id = ?""",
+            (row_id, self.user_id),
+        ).fetchone()
+        return row["period_id"] if row else None
+
+    def _item_idea_id(self, conn, item_id: int) -> Optional[int]:
+        row = conn.execute(
+            """SELECT c.idea_id FROM research_checklist_items c
+               JOIN research_ideas i ON i.id = c.idea_id
+               WHERE c.id = ? AND i.user_id = ?""",
+            (item_id, self.user_id),
+        ).fetchone()
+        return row["idea_id"] if row else None
+
+    # --- ideas -----------------------------------------------------------------
+    def list_ideas(self) -> list[dict]:
+        """Every idea this user has, each with its checklist template and a
+        light-weight list of periods (id/year/month/counts only — no rows) so
+        the sidebar tree loads in one call without pulling every stock row."""
+        with transaction(self.db_path) as conn:
+            ideas = conn.execute(
+                "SELECT id, name, created_at FROM research_ideas WHERE user_id = ? ORDER BY id",
+                (self.user_id,),
+            ).fetchall()
+            out = []
+            for idea in ideas:
+                checklist = conn.execute(
+                    "SELECT id, text FROM research_checklist_items WHERE idea_id = ? ORDER BY position, id",
+                    (idea["id"],),
+                ).fetchall()
+                periods = conn.execute(
+                    """SELECT p.id, p.year, p.month, p.total_count,
+                              (SELECT COUNT(*) FROM research_rows r WHERE r.period_id = p.id) AS row_count
+                       FROM research_periods p WHERE p.idea_id = ?
+                       ORDER BY p.year, p.month""",
+                    (idea["id"],),
+                ).fetchall()
+                out.append(
+                    {
+                        "id": idea["id"],
+                        "name": idea["name"],
+                        "created_at": idea["created_at"],
+                        "checklist": [{"id": c["id"], "text": c["text"]} for c in checklist],
+                        "periods": [dict(p) for p in periods],
+                    }
+                )
+        return out
+
+    def create_idea(self, name: str) -> dict:
+        name = name.strip()
+        if not name:
+            raise ValueError("idea name is required")
+        stamp = _now()
+        with transaction(self.db_path) as conn:
+            cur = conn.execute(
+                "INSERT INTO research_ideas (user_id, name, created_at) VALUES (?, ?, ?)",
+                (self.user_id, name, stamp),
+            )
+            idea_id = cur.lastrowid
+        return {"id": idea_id, "name": name, "created_at": stamp, "checklist": [], "periods": []}
+
+    def delete_idea(self, idea_id: int) -> bool:
+        with transaction(self.db_path) as conn:
+            if not self._owns_idea(conn, idea_id):
+                return False
+            conn.execute("DELETE FROM research_ideas WHERE id = ?", (idea_id,))
+        return True
+
+    # --- checklist template ------------------------------------------------
+    def add_checklist_item(self, idea_id: int, text: str) -> Optional[dict]:
+        text = text.strip()
+        if not text:
+            raise ValueError("checklist item text is required")
+        with transaction(self.db_path) as conn:
+            if not self._owns_idea(conn, idea_id):
+                return None
+            pos = conn.execute(
+                "SELECT COALESCE(MAX(position), -1) + 1 FROM research_checklist_items WHERE idea_id = ?",
+                (idea_id,),
+            ).fetchone()[0]
+            cur = conn.execute(
+                "INSERT INTO research_checklist_items (idea_id, text, position) VALUES (?, ?, ?)",
+                (idea_id, text, pos),
+            )
+            return {"id": cur.lastrowid, "text": text}
+
+    def delete_checklist_item(self, item_id: int) -> bool:
+        with transaction(self.db_path) as conn:
+            idea_id = self._item_idea_id(conn, item_id)
+            if idea_id is None:
+                return False
+            conn.execute("DELETE FROM research_checklist_items WHERE id = ?", (item_id,))
+        return True
+
+    # --- periods (one calendar month under one idea) ------------------------
+    def create_period(self, idea_id: int, year: int, month: int) -> Optional[dict]:
+        """Returns the existing period if this (idea, year, month) already
+        exists — opening "Jan 2026" twice should land you on the same month,
+        not error."""
+        if not (1 <= month <= 12):
+            raise ValueError("month must be 1-12")
+        with transaction(self.db_path) as conn:
+            if not self._owns_idea(conn, idea_id):
+                return None
+            existing = conn.execute(
+                "SELECT id FROM research_periods WHERE idea_id = ? AND year = ? AND month = ?",
+                (idea_id, year, month),
+            ).fetchone()
+            if existing:
+                period_id = existing["id"]
+            else:
+                stamp = _now()
+                cur = conn.execute(
+                    "INSERT INTO research_periods (idea_id, year, month, created_at) VALUES (?, ?, ?, ?)",
+                    (idea_id, year, month, stamp),
+                )
+                period_id = cur.lastrowid
+        return self.get_period(period_id)
+
+    def delete_period(self, period_id: int) -> bool:
+        with transaction(self.db_path) as conn:
+            if self._period_idea_id(conn, period_id) is None:
+                return False
+            conn.execute("DELETE FROM research_periods WHERE id = ?", (period_id,))
+        return True
+
+    def update_period(self, period_id: int, notes: Optional[str] = None, total_count: Optional[int] = None) -> bool:
+        with transaction(self.db_path) as conn:
+            if self._period_idea_id(conn, period_id) is None:
+                return False
+            if notes is not None:
+                conn.execute("UPDATE research_periods SET notes = ? WHERE id = ?", (notes, period_id))
+            if total_count is not None:
+                conn.execute("UPDATE research_periods SET total_count = ? WHERE id = ?", (total_count, period_id))
+        return True
+
+    def get_period(self, period_id: int) -> Optional[dict]:
+        """Full detail for one month: its own fields, every stock row, and the
+        owning idea's checklist with this period's done-state merged in."""
+        with transaction(self.db_path) as conn:
+            idea_id = self._period_idea_id(conn, period_id)
+            if idea_id is None:
+                return None
+            period = conn.execute("SELECT * FROM research_periods WHERE id = ?", (period_id,)).fetchone()
+            rows = conn.execute(
+                "SELECT * FROM research_rows WHERE period_id = ? ORDER BY id", (period_id,)
+            ).fetchall()
+            checklist = conn.execute(
+                """SELECT c.id, c.text, COALESCE(ch.done, 0) AS done
+                   FROM research_checklist_items c
+                   LEFT JOIN research_period_checks ch ON ch.item_id = c.id AND ch.period_id = ?
+                   WHERE c.idea_id = ? ORDER BY c.position, c.id""",
+                (period_id, idea_id),
+            ).fetchall()
+        return {
+            "id": period["id"],
+            "idea_id": period["idea_id"],
+            "year": period["year"],
+            "month": period["month"],
+            "notes": period["notes"],
+            "total_count": period["total_count"],
+            "created_at": period["created_at"],
+            "rows": [self._shape_row(r) for r in rows],
+            "checklist": [{"id": c["id"], "text": c["text"], "done": bool(c["done"])} for c in checklist],
+        }
+
+    # --- stock rows ----------------------------------------------------------
+    def add_row(
+        self,
+        period_id: int,
+        symbol: str,
+        pct: Optional[float] = None,
+        remark: str = "",
+        touch_date: Optional[str] = None,
+        source_run_id: Optional[int] = None,
+    ) -> Optional[dict]:
+        sym = symbol.strip().upper()
+        if not sym:
+            raise ValueError("symbol is required")
+        with transaction(self.db_path) as conn:
+            if self._period_idea_id(conn, period_id) is None:
+                return None
+            stamp = _now()
+            cur = conn.execute(
+                """INSERT INTO research_rows
+                   (period_id, symbol, touch_date, pct, remark, source_run_id, created_at)
+                   VALUES (?,?,?,?,?,?,?)""",
+                (period_id, sym, touch_date, pct, remark, source_run_id, stamp),
+            )
+            row = conn.execute("SELECT * FROM research_rows WHERE id = ?", (cur.lastrowid,)).fetchone()
+        return self._shape_row(row)
+
+    def bulk_add_rows(self, period_id: int, touches: list[dict], source_run_id: int) -> Optional[int]:
+        """Copies a Backtest run's touches in as rows in one transaction —
+        the "attach a run" action. Returns how many rows were added, or None
+        if this period isn't the caller's."""
+        with transaction(self.db_path) as conn:
+            if self._period_idea_id(conn, period_id) is None:
+                return None
+            stamp = _now()
+            conn.executemany(
+                """INSERT INTO research_rows
+                   (period_id, symbol, touch_date, pct, remark, source_run_id, created_at)
+                   VALUES (?,?,?,?,?,?,?)""",
+                [
+                    (
+                        period_id,
+                        t["symbol"].strip().upper(),
+                        t.get("date"),
+                        t.get("touch_pct"),
+                        "",
+                        source_run_id,
+                        stamp,
+                    )
+                    for t in touches
+                ],
+            )
+        return len(touches)
+
+    def update_row(self, row_id: int, pct: Optional[float] = None, remark: Optional[str] = None) -> bool:
+        with transaction(self.db_path) as conn:
+            if self._row_period_id(conn, row_id) is None:
+                return False
+            if pct is not None:
+                conn.execute("UPDATE research_rows SET pct = ? WHERE id = ?", (pct, row_id))
+            if remark is not None:
+                conn.execute("UPDATE research_rows SET remark = ? WHERE id = ?", (remark, row_id))
+        return True
+
+    def delete_row(self, row_id: int) -> bool:
+        with transaction(self.db_path) as conn:
+            if self._row_period_id(conn, row_id) is None:
+                return False
+            conn.execute("DELETE FROM research_rows WHERE id = ?", (row_id,))
+        return True
+
+    # --- checklist done-state, per period -------------------------------------
+    def set_check(self, period_id: int, item_id: int, done: bool) -> bool:
+        with transaction(self.db_path) as conn:
+            if self._period_idea_id(conn, period_id) is None:
+                return False
+            conn.execute(
+                """INSERT INTO research_period_checks (period_id, item_id, done) VALUES (?, ?, ?)
+                   ON CONFLICT (period_id, item_id) DO UPDATE SET done = excluded.done""",
+                (period_id, item_id, 1 if done else 0),
+            )
+        return True
+
+    @staticmethod
+    def _shape_row(r) -> dict:
+        return {
+            "id": r["id"],
+            "symbol": r["symbol"],
+            "touch_date": r["touch_date"],
+            "pct": r["pct"],
+            "remark": r["remark"],
+            "source_run_id": r["source_run_id"],
+            "created_at": r["created_at"],
+        }
