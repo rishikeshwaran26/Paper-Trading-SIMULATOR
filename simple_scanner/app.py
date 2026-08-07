@@ -14,9 +14,9 @@ Then open: http://localhost:5050
 
 from __future__ import annotations
 
+import csv
 import os
 import re
-import shutil
 import sys
 from datetime import date, timedelta
 
@@ -65,6 +65,38 @@ def symbol_names() -> dict[str, str]:
         rows, _source = load_universe(UNIVERSE_CACHE)
         _NAME_CACHE = {r["symbol"].strip().upper(): r["name"] for r in rows}
     return _NAME_CACHE
+
+
+def _write_annotated_csv(src: str, dest: str) -> None:
+    """Copies one bhavcopy day into `dest`, adding UP_PCT and DOWN_PCT columns
+    — the same move the scan itself computes (high/low vs previous close,
+    rounded before comparison, same as the band test above), worked out for
+    every row, not just the ones that matched a band. So opening the exported
+    file shows the number you came here for already sitting in it, instead of
+    the raw exchange file you'd have to do the maths on yourself.
+    """
+    with open(src, newline="", encoding="utf-8") as fh:
+        rows = list(csv.DictReader(fh))
+    if not rows:
+        return
+    fieldnames = list(rows[0].keys()) + ["UP_PCT", "DOWN_PCT"]
+    for row in rows:
+        try:
+            prev_close = float(row["PREV_CLOSE"])
+            high = float(row["HIGH_PRICE"])
+            low = float(row["LOW_PRICE"])
+        except (KeyError, ValueError):
+            prev_close = 0
+        if prev_close > 0:
+            row["UP_PCT"] = round((high - prev_close) / prev_close * 100, 2)
+            row["DOWN_PCT"] = round((low - prev_close) / prev_close * 100, 2)
+        else:
+            row["UP_PCT"] = ""
+            row["DOWN_PCT"] = ""
+    with open(dest, "w", newline="", encoding="utf-8") as fh:
+        writer = csv.DictWriter(fh, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
 
 
 # Shared market cap cache — lives in the main app's data/ so a symbol looked
@@ -195,8 +227,8 @@ def scan():
             except OSError:
                 # Windows locks a file while Explorer/another process has it
                 # open (e.g. you had it open from the last scan) — that's not
-                # a reason to fail the whole scan. shutil.copyfile below can
-                # still overwrite an in-place file it couldn't delete; only a
+                # a reason to fail the whole scan. Writing the new file below
+                # can still overwrite an in-place file it couldn't delete; only a
                 # genuinely stale file from a date no longer in this scan
                 # would survive as clutter, which the next successful scan
                 # will clear.
@@ -206,7 +238,7 @@ def scan():
         src = os.path.join(CACHE_DIR, f"{iso}.csv")
         if os.path.exists(src):
             try:
-                shutil.copyfile(src, os.path.join(EXPORT_DIR, f"{iso}.csv"))
+                _write_annotated_csv(src, os.path.join(EXPORT_DIR, f"{iso}.csv"))
             except OSError:
                 continue  # same lock story as above — skip, don't fail the scan
             exported_files.append(f"{iso}.csv")
