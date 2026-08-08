@@ -79,6 +79,19 @@
   ul.hits .pct.down { color: var(--neg); }
   .empty-list { color: var(--muted); font-size: 12.5px; padding: 8px 2px; }
 
+  /* Phone: the two date fields and the up/down lists sit side by side by
+     default, which leaves each about 160px wide on a 375px screen — too
+     narrow to read a symbol and a percentage. Both stack instead, and the
+     hit lists drop their fixed max-height so the page scrolls as one thing
+     rather than trapping a scroll region inside another. */
+  @media (max-width: 520px) {
+    .wrap { padding: 20px 12px; }
+    .row { flex-wrap: wrap; }
+    .row > div { flex: 1 1 100%; }
+    .lists { flex-direction: column; gap: 14px; }
+    ul.hits { max-height: none; }
+  }
+
   .controls { display: flex; gap: 12px; margin-top: 16px; align-items: flex-end; }
   .controls > div { flex: 1; }
   .controls label { margin-bottom: 4px; }

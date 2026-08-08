@@ -128,7 +128,13 @@ button:focus-visible, a:focus-visible { outline-offset: 3px; }
 .content { max-width: 1120px; margin: 0 auto; padding: 28px 24px 40px; }
 .foot { max-width: 1120px; margin: 0 auto; padding: 8px 24px 32px; font-size: 12.5px; color: var(--muted-2); }
 .page { animation: fade .18s var(--ease); }
-@keyframes fade { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+/* Opacity only, deliberately no transform. A transformed ancestor becomes the
+   containing block for any `position: fixed` descendant, so the little
+   translateY this used to have quietly re-anchored the filter drawer's
+   full-screen backdrop to THIS element instead of the viewport — the drawer
+   ended up 3400px tall, starting below the header. Invisible on desktop
+   (content is short and sits at the top); on a phone it ran off the screen. */
+@keyframes fade { from { opacity: 0; } to { opacity: 1; } }
 
 /* --- cards + grid ---------------------------------------------------------- */
 .card {
@@ -441,6 +447,80 @@ a.small:hover { background: var(--panel-hover); }
   display: inline-block; margin-left: 7px; min-width: 18px; padding: 1px 6px;
   border-radius: 999px; background: var(--accent); color: #fff;
   font-size: 11px; font-weight: 700; text-align: center;
+}
+
+/* --- phone / small screens --------------------------------------------------
+   Everything above is desktop-first: wide data tables, a calendar floating at
+   the top-right, forms laid out side by side. These rules make the same
+   markup usable on a phone — no JSX changes, so there's one layout to reason
+   about rather than two diverging ones. */
+@media (max-width: 720px) {
+  .content { padding: 16px 12px 32px; }
+  h1 { font-size: 20px; margin-bottom: 14px; }
+
+  /* Nav wraps onto its own line instead of overflowing off-screen. */
+  .topbar { flex-direction: column; align-items: stretch; gap: 8px; padding: 10px 12px; }
+  .topbar nav { flex-wrap: wrap; gap: 4px; }
+  .topbar nav a { margin-left: 0; padding: 6px 10px; font-size: 13px; }
+  .brand { font-size: 15px; flex-wrap: wrap; gap: 6px; }
+  .user-chip { margin-left: auto; }
+
+  /* The trading calendar hangs OUT of the header's flow (absolute) so it
+     would sit on top of the page it overlaps. It also needs a 7-column grid
+     to mean anything, so shrinking is not an option — hidden on phones. */
+  .topbar-calendar-row { display: none; }
+
+  /* Stat tiles two-per-row rather than one long squeezed line. */
+  .summary-row { gap: 8px; }
+  .stat { flex: 1 1 calc(50% - 8px); min-width: 0; padding: 10px 12px; }
+  .stat-value { font-size: 17px; }
+  .stat-label { font-size: 10.5px; }
+
+  .card { padding: 14px 12px; margin-bottom: 12px; }
+
+  /* Wide tables scroll sideways as a unit with the Symbol column pinned, so
+     you never lose track of which row a number belongs to. Cards-per-row was
+     the alternative, but these tables exist to be COMPARED down a column —
+     that reading is lost the moment each row becomes its own block. */
+  .table {
+    display: block; overflow-x: auto; overflow-y: visible;
+    -webkit-overflow-scrolling: touch; white-space: nowrap;
+  }
+  .table th, .table td { padding: 8px 10px; font-size: 12.5px; }
+  /* sticky-top and sticky-left on the same cell fight each other; on a phone
+     the frozen first COLUMN is what's actually worth having. */
+  .table th { position: static; }
+  .table th:first-child, .table td:first-child {
+    position: sticky; left: 0; z-index: 2; box-shadow: 1px 0 0 var(--line-soft);
+  }
+  .table th:first-child { background: var(--panel-2); }
+  .table td:first-child { background: var(--panel); }
+  .table tbody tr:hover td:first-child { background: #fafafa; }
+
+  /* Form fields stack instead of being squeezed side by side. */
+  .row { gap: 8px; }
+  .row > label { flex: 1 1 100%; min-width: 0; }
+
+  .seg { flex-wrap: wrap; width: 100%; }
+  .seg button { flex: 1 1 auto; padding: 7px 10px; font-size: 12.5px; }
+
+  /* Filter drawer goes full-screen, and its category rail becomes a
+     horizontal strip on top rather than eating half the width. The rail is
+     display:block on desktop with full-width buttons, so it needs BOTH the
+     flex switch and a width override — flex-direction alone does nothing to
+     a block container, and the buttons would still each claim a full row. */
+  .drawer-body { flex-direction: column; min-height: 0; }
+  .drawer-rail {
+    display: flex; flex-direction: row; width: 100%; flex-shrink: 0;
+    overflow-x: auto; overflow-y: hidden;
+    border-right: none; border-bottom: 1px solid var(--line);
+  }
+  .drawer-rail button {
+    width: auto; flex: 0 0 auto; white-space: nowrap;
+    padding: 11px 14px; border-bottom: none; border-right: 1px solid var(--line-soft);
+  }
+  .drawer-rail button.on { box-shadow: inset 0 -3px 0 var(--accent); }
+  .drawer-pane { padding: 14px 14px 20px; }
 }
 
 /* honour users who prefer less motion */
