@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { api } from "../api.js";
 import { Loading, ErrorBanner } from "../components/Status.jsx";
-import { pct, rupees } from "../format.js";
+import { pct, rupees, companyAge, listingAgeTitle } from "../format.js";
 
 // BACKTEST PAGE — does the "20% spike reverts" idea actually hold up?
 //
@@ -73,10 +73,41 @@ function dayGapPct(t, offset, findDay) {
   return ((day.open - prevClose) / prevClose) * 100;
 }
 
+// One before-day's own daily move — its close against the previous trading
+// day's close, exactly what "the stock was 6% down on Jan 4" means.
+//
+// Day -k needs the close of day -(k+1), so the furthest tracked before-day can
+// never have one. Returns null when it cannot be computed, and callers treat
+// null as "cannot judge" rather than as 0%.
+function beforeDayOwnMove(t, offset) {
+  const days = t.before_days ?? [];
+  const cur = days.find((d) => d.offset === offset);
+  const prior = days.find((d) => d.offset === offset - 1);
+  if (!cur || !prior || !prior.close) return null;
+  return ((cur.close - prior.close) / prior.close) * 100;
+}
+
+// How a day's return is calculated based on active metric:
+//   "daily"    — that day alone: day-over-day return vs the previous trading day's close.
+//                For follow-days (+1, +2...), pct_from_prev_day (e.g. Day +2 vs Day +1 close).
+//                For before-days (-1, -2...), beforeDayOwnMove (e.g. Day -1 vs Day -2 close).
+//   "close"    — cumulative move from the touch day's close (pct_from_touch).
+//   "intraday" — that day's own open to close (open_close_pct).
+function getDayMove(t, d, metric = "close") {
+  if (!d) return null;
+  if (metric === "intraday") return d.open_close_pct;
+  if (metric === "daily") {
+    if (d.offset > 0) return d.pct_from_prev_day;
+    if (d.offset < 0) return beforeDayOwnMove(t, d.offset);
+    return t.close_pct;
+  }
+  return d.pct_from_touch;
+}
+
 function sortValue(t, key, viewDay, findDay, metric = "close", w52 = {}) {
   // The per-day columns sort on whichever move is currently being scored, so
   // the ordering always matches the numbers actually on screen.
-  const move = (d) => (d == null ? null : metric === "intraday" ? d.open_close_pct : d.pct_from_touch);
+  const move = (d) => getDayMove(t, d, metric);
   if (key === "symbol") return t.symbol;
   if (key === "date") return t.date;
   if (key === "touch_pct") return t.touch_pct;
@@ -98,20 +129,6 @@ function sortValue(t, key, viewDay, findDay, metric = "close", w52 = {}) {
 // forward-in-time price change. Deliberately NOT pct_from_prev_day: on
 // before-days that field is computed walking BACKWARDS from the touch, so its
 // sign reads inverted for this question.
-
-// One before-day's own daily move — its close against the previous trading
-// day's close, exactly what "the stock was 6% down on Jan 4" means.
-//
-// Day -k needs the close of day -(k+1), so the furthest tracked before-day can
-// never have one. Returns null when it cannot be computed, and callers treat
-// null as "cannot judge" rather than as 0%.
-function beforeDayOwnMove(t, offset) {
-  const days = t.before_days ?? [];
-  const cur = days.find((d) => d.offset === offset);
-  const prior = days.find((d) => d.offset === offset - 1);
-  if (!cur || !prior || !prior.close) return null;
-  return ((cur.close - prior.close) / prior.close) * 100;
-}
 
 // The whole run-up: close on the furthest visible before-day against the close
 // on the day right before the touch.
@@ -191,6 +208,7 @@ const DEFAULT_FILTERS = {
   // data that existed before the touch day — so unlike low/high this one is a
   // legitimate predictor and DOES feed the panel.
   w52: ["all"],         // ["all"] | subset of W52_KEYS
+  segregation: {},
 };
 
 // Exclusive buckets, so "made a new high" and "froze at a new high" can be
@@ -236,20 +254,17 @@ const dayName = (dateStr) => DOW_NAMES[new Date(dateStr).getUTCDay()];
 const ROUND_TRIP_COST_PCT = 0.10;
 
 // `metric` picks WHICH move is being scored:
-//   "close"    — pct_from_touch: the touch day's close to this day's close.
-//                Contains the overnight gap between the two sessions.
-//   "intraday" — open_close_pct: this session's own open to its own close, the
-//                only part an intraday trade (in by 9:15, out by 3:30) actually
-//                captures. A stock can gap up overnight and still fall all day;
-//                "close" scores that as a rise, "intraday" as the fall it was.
-function summarizeOffset(touches, offset, direction = "up", metric = "close") {
+//   "daily"    — that day alone: day-over-day return vs the previous trading day's close.
+//   "close"    — pct_from_touch: the touch day's close to this day's close (cumulative).
+//   "intraday" — open_close_pct: this session's own open to its own close.
+function summarizeOffset(touches, offset, direction = "up", metric = "daily") {
   const moves = [];
   for (const t of touches) {
     const list = offset >= 0 ? t.follow_days : t.before_days;
     const d = (list ?? []).find((x) => x.offset === offset);
     if (!d) continue;
-    const v = metric === "intraday" ? d.open_close_pct : d.pct_from_touch;
-    if (v != null) moves.push(v); // no open price -> unscorable, never a flat 0%
+    const v = getDayMove(t, d, metric);
+    if (v != null) moves.push(v); // no open price / unscorable -> never a flat 0%
   }
   const up = moves.filter((m) => m > 0);
   const down = moves.filter((m) => m < 0);
@@ -298,6 +313,14 @@ function countActiveFilters(f, runBefore, runAfter) {
   if (!f.w52.includes("all")) n++;
   if (f.viewBefore != null && f.viewBefore < runBefore) n++;
   if (f.viewAfter != null && f.viewAfter < runAfter) n++;
+  
+  const segKeys = Object.keys(f.segregation || {});
+  for (const offsetStr of segKeys) {
+    const cond = f.segregation[offsetStr];
+    if (cond && cond.type !== "none" && cond.pct != null && cond.pct !== "") {
+      n++;
+    }
+  }
   return n;
 }
 
@@ -365,14 +388,15 @@ function BandStudy({ singleDate }) {
   //   viewAfter   — same for follow-days.
   const [filters, setFilters] = useState(DEFAULT_FILTERS);
   const [drawerOpen, setDrawerOpen] = useState(false);
-  // "close" | "intraday" — which move every score on this page is measured on.
-  // See summarizeOffset. Intraday is the honest one for a same-session trade.
-  const [metric, setMetric] = useState("close");
+  // "daily" | "close" | "intraday" — which move every score on this page is measured on.
+  // See summarizeOffset.
+  const [metric, setMetric] = useState("daily");
 
   const [run, setRun] = useState(null);
   const [runs, setRuns] = useState([]);
   const [caps, setCaps] = useState({});   // symbol -> "large"|"mid"|"small"|"unknown"
   const [w52, setW52] = useState({});     // "SYMBOL|DATE" -> { bucket, w52_high, w52_low }
+  const [listingDates, setListingDates] = useState({}); // symbol -> "YYYY-MM-DD"
   const [status, setStatus] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -394,6 +418,7 @@ function BandStudy({ singleDate }) {
     setLoading(true);
     setCaps({});
     setW52({});
+    setListingDates({});
     try {
       const d = await api.getBandStudyRun(id);
       setRun(d);
@@ -418,6 +443,7 @@ function BandStudy({ singleDate }) {
       // Same deal for the 52-week labels — rebuilt from the bhavcopy cache, so
       // the first call on a wide run takes a few seconds and later ones don't.
       api.getBandStudyRunWeek52(id).then((w) => setW52(w.week52 ?? {})).catch(() => {});
+      api.getBandStudyRunListingDates(id).then((l) => setListingDates(l.listing_dates ?? {})).catch(() => {});
     } catch (e) {
       setError(e);
     } finally {
@@ -495,14 +521,14 @@ function BandStudy({ singleDate }) {
   // rendering both work off one shape regardless of which day is selected.
   // viewDay === 0 means "all days" — no single day is flattened in.
   const rows = useMemo(() => {
-    const dayMove = (d) => (d == null ? null : metric === "intraday" ? d.open_close_pct : d.pct_from_touch);
     return touches.map((t) => {
       const d = viewDay !== 0 ? findDay(t, viewDay) : null;
+      const v = getDayMove(t, d, metric);
       // The value "up only"/"down only" judges by: the viewed day's move, or
       // the touch day's own move when "All days" is selected (no single day to
       // judge by there). Follows the metric so the filter agrees with the panel.
-      const outcomeVal = viewDay !== 0 ? dayMove(d) : t.close_pct;
-      return { ...t, _day: d, _pct: dayMove(d), _outcome: outcomeVal };
+      const outcomeVal = viewDay !== 0 ? v : t.close_pct;
+      return { ...t, _day: d, _pct: v, _outcome: outcomeVal };
     });
   }, [touches, viewDay, metric]);
 
@@ -568,9 +594,21 @@ function BandStudy({ singleDate }) {
         const ok = filters.gap.direction === "above" ? g >= filters.gap.pct : g <= -filters.gap.pct;
         if (!ok) return false;
       }
+      
+      const segKeys = Object.keys(filters.segregation || {});
+      for (const offsetStr of segKeys) {
+        const cond = filters.segregation[offsetStr];
+        if (!cond || cond.type === "none" || cond.pct == null || cond.pct === "") continue;
+        const offset = Number(offsetStr);
+        const day = findDay(t, offset);
+        if (!day || day.pct_from_prev_day == null) return false;
+        if (cond.type === "up" && day.pct_from_prev_day < cond.pct) return false;
+        if (cond.type === "down" && day.pct_from_prev_day > -cond.pct) return false;
+      }
+
       return true;
     });
-  }, [predictionTouches, filters.outcome, filters.low, filters.high, filters.gap, viewDay]);
+  }, [predictionTouches, filters.outcome, filters.low, filters.high, filters.gap, filters.segregation, viewDay]);
 
   // Plain-English list of whichever view-only filters are on, for the note that
   // explains why the row count and the panel count disagree.
@@ -584,8 +622,15 @@ function BandStudy({ singleDate }) {
         ? `days that opened ${filters.gap.pct}%+ above the previous close`
         : `days that opened ${filters.gap.pct}%+ below the previous close`);
     }
+    const segKeys = Object.keys(filters.segregation || {});
+    for (const offsetStr of segKeys) {
+      const cond = filters.segregation[offsetStr];
+      if (cond && cond.type !== "none" && cond.pct != null && cond.pct !== "") {
+        out.push(`Day ${offsetStr} ${cond.type === "up" ? `went up ≥ ${cond.pct}%` : `went down ≥ ${cond.pct}%`}`);
+      }
+    }
     return out;
-  }, [filters.outcome, filters.low, filters.high, filters.gap]);
+  }, [filters.outcome, filters.low, filters.high, filters.gap, filters.segregation]);
 
   // Only what the circuit-lock rule ITSELF removed — a touch that the
   // before-move filter would have dropped anyway is not counted here, so the
@@ -776,6 +821,7 @@ function BandStudy({ singleDate }) {
           activeFilterCount={activeFilterCount}
           caps={caps}
           w52={w52}
+          listingDates={listingDates}
         />
       )}
 
@@ -810,7 +856,7 @@ function BandStudy({ singleDate }) {
 function BandStudyResult({
   run, touches, predictionTouches, totalCount, viewOnlyFilters, beforeMoveOn, lockedExcluded, metric, onMetric,
   onSort, sortArrow, viewDay, onViewDay, followDays, beforeDays,
-  findDay, onOpenFilters, activeFilterCount, caps, w52,
+  findDay, onOpenFilters, activeFilterCount, caps, w52, listingDates = {},
 }) {
   const flaggedCount = touches.filter((t) => t.corporate_action_suspected).length;
   const dayOffsets = Array.from({ length: followDays }, (_, i) => i + 1);
@@ -855,23 +901,29 @@ function BandStudyResult({
         </div>
       )}
 
-      {/* Which move every number on this page is scored on. Both are already in
-          the data, so switching is instant. */}
+      {/* Which move every number on this page is scored on. Switching is instant. */}
       <div className="card" style={{ padding: "12px 16px" }}>
         <div className="card-title" style={{ marginBottom: 8 }}>Score each day on</div>
-        <div className="seg" style={{ marginBottom: 8 }}>
+        <div className="seg" style={{ marginBottom: 8, flexWrap: "wrap" }}>
+          <button type="button" className={metric === "daily" ? "on" : ""} onClick={() => onMetric("daily")}>
+            Day-to-day (that day alone)
+          </button>
           <button type="button" className={metric === "close" ? "on" : ""} onClick={() => onMetric("close")}>
-            Close-to-close
+            Close-to-close (cumulative)
           </button>
           <button type="button" className={metric === "intraday" ? "on" : ""} onClick={() => onMetric("intraday")}>
             Open→close (intraday)
           </button>
         </div>
         <p className="muted" style={{ fontSize: 12.5, margin: 0 }}>
-          {metric === "close" ? (
+          {metric === "daily" ? (
             <>
-              Measured from the touch day's close, so it includes the <strong>overnight gap</strong> into each
-              session. Right for a position held overnight — but a same-session trade never gets that gap.
+              Each session's own <strong>day-over-day change</strong> against the previous trading day's close (Day +1 vs Touch close, Day +2 vs Day +1 close, etc.). Shows the change in each individual day alone.
+            </>
+          ) : metric === "close" ? (
+            <>
+              Measured cumulatively from the <strong>touch day's close</strong>, so it includes the <strong>overnight gap</strong> into each
+              session. Right for a position held overnight from the touch date.
             </>
           ) : (
             <>
@@ -963,10 +1015,13 @@ function BandStudyResult({
           days on?" and "day -3" answers "where was it, 3 days before?" */}
       <div className="card">
         <div className="card-title">
-          {metric === "intraday"
+          {metric === "daily"
+            ? "Each day's own day-over-day move vs previous day (up vs down kept separate)"
+            : metric === "intraday"
             ? "Each day's own open→close move (up vs down kept separate)"
             : "Cumulative move by each tracked day (up vs down kept separate)"}
         </div>
+      <div className="table-wrap">
         <table className="table">
           <thead>
             <tr>
@@ -1002,6 +1057,7 @@ function BandStudyResult({
             ))}
           </tbody>
         </table>
+      </div>
         <p className="muted" style={{ fontSize: 12.5, margin: "10px 0 0" }}>
           <strong>EV (net)</strong> is what one trade averages after {ROUND_TRIP_COST_PCT}% round-trip costs
           (brokerage, STT, stamp duty, exchange fees). A high down-% still loses money when the minority that rise,
@@ -1038,164 +1094,202 @@ function BandStudyResult({
             )}
           </p>
         )}
-        <table className="table screener-table">
-          <thead>
-            <tr>
-              <th className="sortable" onClick={() => onSort("symbol")}>Symbol{sortArrow("symbol")}</th>
-              <th className="num sortable" onClick={() => onSort("date")}>Touch date{sortArrow("date")}</th>
-              <th className="num sortable" onClick={() => onSort("touch_pct")}>Touch %{sortArrow("touch_pct")}</th>
-              <th className="num sortable" onClick={() => onSort("close_pct")}>Close %{sortArrow("close_pct")}</th>
-              {showingAll ? (
-                allOffsets.map((n) => (
-                  <th key={n} className="num sortable" onClick={() => onSort(`offset:${n}`)}>
-                    D{n}{sortArrow(`offset:${n}`)}
-                  </th>
-                ))
-              ) : (
-                <>
-                  <th className="num sortable" onClick={() => onSort("_gap")} title="This day's own open, against the close of the trading day right before it">
-                    Open{sortArrow("_gap")}
-                  </th>
-                  <th className="num sortable" onClick={() => onSort("_pct")} title="Where this day actually closed — cumulative move from the TOUCH day's close, not this day's own open-to-close">
-                    Close{sortArrow("_pct")}
-                  </th>
-                  <th className="num sortable" onClick={() => onSort("_low")} title="Lowest the stock traded that day, measured from the touch day's close">
-                    Low{sortArrow("_low")}
-                  </th>
-                  <th className="num sortable" onClick={() => onSort("_high")} title="Highest the stock traded that day, measured from the touch day's close">
-                    High{sortArrow("_high")}
-                  </th>
-                  <th className="num sortable" onClick={() => onSort("_w52_low")} title="The 52-week low as of the touch date, using only bars before it">
-                    52w Low{sortArrow("_w52_low")}
-                  </th>
-                  <th className="num sortable" onClick={() => onSort("_w52_high")} title="The 52-week high as of the touch date, using only bars before it">
-                    52w High{sortArrow("_w52_high")}
-                  </th>
-                  <th></th>
-                </>
-              )}
-            </tr>
-          </thead>
-          <tbody>
-            {touches.map((t) => {
-              return (
-                <tr key={`${t.symbol}-${t.date}`} style={t.corporate_action_suspected ? { opacity: 0.55 } : undefined}>
-                  <td>
-                    <Link
-                      to={`/backtest/chart/${encodeURIComponent(t.symbol)}?date=${encodeURIComponent(t.date)}`}
-                      target="_blank"
-                      title="Open the candlestick chart in a new tab"
+        <div className="table-wrap">
+          <table className="table screener-table">
+            <thead>
+              <tr>
+                <th className="sortable" onClick={() => onSort("symbol")}>Symbol{sortArrow("symbol")}</th>
+                <th className="num sortable" onClick={() => onSort("date")}>Touch date{sortArrow("date")}</th>
+                <th className="num sortable" onClick={() => onSort("touch_pct")}>Touch %{sortArrow("touch_pct")}</th>
+                <th className="num sortable" onClick={() => onSort("close_pct")}>Close %{sortArrow("close_pct")}</th>
+                {showingAll ? (
+                  allOffsets.map((n) => (
+                    <th key={n} className="num sortable" onClick={() => onSort(`offset:${n}`)}>
+                      D{n}{sortArrow(`offset:${n}`)}
+                    </th>
+                  ))
+                ) : (
+                  <>
+                    <th className="num sortable" onClick={() => onSort("_gap")} title="This day's own open, against the close of the trading day right before it">
+                      Open{sortArrow("_gap")}
+                    </th>
+                    <th
+                      className="num sortable"
+                      onClick={() => onSort("_pct")}
+                      title={
+                        metric === "daily"
+                          ? "How much the stock moved on this day alone, against the previous trading day's close"
+                          : metric === "intraday"
+                          ? "This session's own open to close"
+                          : "Where this day actually closed — cumulative move from the TOUCH day's close"
+                      }
                     >
-                      <strong>{t.symbol}</strong>
-                    </Link>
-                    {t.corporate_action_suspected && (
-                      <span className="tag warn" title="Bhavcopy vs Yahoo-adjusted price disagree sharply — likely a split/bonus, not a real move">
-                        ⚠ possible split/bonus
-                      </span>
-                    )}
-                    {isCircuitLocked(t) && (
-                      <span className="tag warn" title="Closed at its own high — almost certainly frozen at the upper circuit, so it could not have been shorted">
-                        frozen
-                      </span>
-                    )}
-                    {caps[t.symbol] && caps[t.symbol] !== "unknown" && (
-                      <span className={`tag cap-${caps[t.symbol]}`} title={`${caps[t.symbol]} cap`}>
-                        {caps[t.symbol]}
-                      </span>
-                    )}
-                    {(() => {
-                      const b = w52[w52Key(t)];
-                      if (!b || b.bucket === "none" || b.bucket === "unknown") return null;
-                      const side = b.bucket.endsWith("high") ? "high" : "low";
-                      return (
-                        <span
-                          className={`tag w52-${side}`}
-                          title={`52w high ${b.w52_high} · 52w low ${b.w52_low} (from ${b.bars} prior sessions)`}
-                        >
-                          {W52_OPTS.find((o) => o.key === b.bucket)?.label ?? b.bucket}
-                        </span>
-                      );
-                    })()}
-                    <div className="muted" style={{ fontSize: 12 }}>{t.name}</div>
-                  </td>
-                  <td className="num">
-                    {t.date} <span className="muted">({dayName(t.date)})</span>
-                  </td>
-                  <td className={`num ${t.direction === "up" ? "pos" : "neg"}`}>{pct(t.touch_pct)}</td>
-                  <td className="num">
-                    <div>{pct(t.close_pct)}</div>
-                    <div className="muted" style={{ fontSize: 11 }}>{rupees(t.close)}</div>
-                  </td>
+                      {metric === "daily" ? "Day change" : metric === "intraday" ? "Intraday" : "Close"}
+                      {sortArrow("_pct")}
+                    </th>
+                    <th className="num sortable" onClick={() => onSort("_low")} title="Lowest the stock traded that day, measured from the touch day's close">
+                      Low{sortArrow("_low")}
+                    </th>
+                    <th className="num sortable" onClick={() => onSort("_high")} title="Highest the stock traded that day, measured from the touch day's close">
+                      High{sortArrow("_high")}
+                    </th>
+                    <th className="num sortable" onClick={() => onSort("_w52_low")} title="The 52-week low as of the touch date, using only bars before it">
+                      52w Low{sortArrow("_w52_low")}
+                    </th>
+                    <th className="num sortable" onClick={() => onSort("_w52_high")} title="The 52-week high as of the touch date, using only bars before it">
+                      52w High{sortArrow("_w52_high")}
+                    </th>
+                    <th></th>
+                  </>
+                )}
+              </tr>
+            </thead>
+            <tbody>
+              {touches.map((t) => {
+                return (
+                  <tr key={`${t.symbol}-${t.date}`} style={t.corporate_action_suspected ? { opacity: 0.55 } : undefined}>
+                    <td>
+                      <div className="symbol-cell">
+                        <div className="symbol-cell-top">
+                          <Link
+                            to={`/backtest/chart/${encodeURIComponent(t.symbol)}?date=${encodeURIComponent(t.date)}`}
+                            target="_blank"
+                            title="Open the candlestick chart in a new tab"
+                          >
+                            <strong>{t.symbol}</strong>
+                          </Link>
+                          <div className="symbol-tags">
+                            {t.corporate_action_suspected && (
+                              <span className="tag warn" title="Bhavcopy vs Yahoo-adjusted price disagree sharply — likely a split/bonus, not a real move">
+                                ⚠ split/bonus
+                              </span>
+                            )}
+                            {isCircuitLocked(t) && (
+                              <span className="tag warn" title="Closed at its own high — almost certainly frozen at the upper circuit, so it could not have been shorted">
+                                frozen
+                              </span>
+                            )}
+                            {caps[t.symbol] && caps[t.symbol] !== "unknown" && (
+                              <span className={`tag cap-${caps[t.symbol]}`} title={`${caps[t.symbol]} cap`}>
+                                {caps[t.symbol]}
+                              </span>
+                            )}
+                            {listingDates[t.symbol] && (() => {
+                              const age = companyAge(listingDates[t.symbol], t.date);
+                              if (!age) return null;
+                              return (
+                                <span
+                                  className="tag age-tag"
+                                  title={listingAgeTitle(listingDates[t.symbol], t.date)}
+                                >
+                                  {age}
+                                </span>
+                              );
+                            })()}
+                            {(() => {
+                              const b = w52[w52Key(t)];
+                              if (!b || b.bucket === "none" || b.bucket === "unknown") return null;
+                              const side = b.bucket.endsWith("high") ? "high" : "low";
+                              return (
+                                <span
+                                  className={`tag w52-${side}`}
+                                  title={`52w high ${b.w52_high} · 52w low ${b.w52_low} (from ${b.bars} prior sessions)`}
+                                >
+                                  {W52_OPTS.find((o) => o.key === b.bucket)?.label ?? b.bucket}
+                                </span>
+                              );
+                            })()}
+                          </div>
+                        </div>
+                        <div className="symbol-company-name" title={t.name}>{t.name}</div>
+                      </div>
+                    </td>
+                    <td className="num">
+                      {t.date} <span className="muted">({dayName(t.date)})</span>
+                    </td>
+                    <td className={`num ${t.direction === "up" ? "pos" : "neg"}`}>{pct(t.touch_pct)}</td>
+                    <td className="num">
+                      <div>{pct(t.close_pct)}</div>
+                      <div className="muted" style={{ fontSize: 11 }}>{rupees(t.close)}</div>
+                    </td>
 
-                  {showingAll ? (
-                    allOffsets.map((n) => {
-                      const d = findDay(t, n);
-                      const v = d == null ? null : metric === "intraday" ? d.open_close_pct : d.pct_from_touch;
-                      return (
-                        <td
-                          key={n}
-                          className={`num ${v == null ? "" : v >= 0 ? "pos" : "neg"}`}
-                          title={d ? `${d.date} · open ${d.open ?? "—"} · close ${d.close}` : "no data this far out"}
-                        >
-                          {v != null ? pct(v) : "—"}
+                    {showingAll ? (
+                      allOffsets.map((n) => {
+                        const d = findDay(t, n);
+                        const v = getDayMove(t, d, metric);
+                        const prevClose = n === 1 ? t.close : n > 1 ? findDay(t, n - 1)?.close : findDay(t, n - 1)?.close;
+                        return (
+                          <td
+                            key={n}
+                            className={`num ${v == null ? "" : v >= 0 ? "pos" : "neg"}`}
+                            title={
+                              d
+                                ? `${d.date} · open ${d.open ?? "—"} · close ${d.close}${
+                                    metric === "daily" && prevClose != null ? ` · prev close ${prevClose}` : ""
+                                  }`
+                                : "no data this far out"
+                            }
+                          >
+                            {v != null ? pct(v) : "—"}
+                          </td>
+                        );
+                      })
+                    ) : (
+                      <>
+                        {(() => {
+                          const g = dayGapPct(t, viewDay, findDay);
+                          const openRaw = t._day?.open;
+                          return (
+                            <td className={`num ${g == null ? "" : g >= 0 ? "pos" : "neg"}`}>
+                              <div>{g != null ? pct(g) : "—"}</div>
+                              {openRaw != null && <div className="muted" style={{ fontSize: 11 }}>{rupees(openRaw)}</div>}
+                            </td>
+                          );
+                        })()}
+                        <td className={`num ${t._pct == null ? "" : t._pct >= 0 ? "pos" : "neg"}`}>
+                          <div>{t._pct != null ? pct(t._pct) : "—"}</div>
+                          {t._day?.close != null && <div className="muted" style={{ fontSize: 11 }}>{rupees(t._day.close)}</div>}
                         </td>
-                      );
-                    })
-                  ) : (
-                    <>
-                      {(() => {
-                        const g = dayGapPct(t, viewDay, findDay);
-                        const openRaw = t._day?.open;
-                        return (
-                          <td className={`num ${g == null ? "" : g >= 0 ? "pos" : "neg"}`}>
-                            <div>{g != null ? pct(g) : "—"}</div>
-                            {openRaw != null && <div className="muted" style={{ fontSize: 11 }}>{rupees(openRaw)}</div>}
-                          </td>
-                        );
-                      })()}
-                      <td className={`num ${t._pct == null ? "" : t._pct >= 0 ? "pos" : "neg"}`}>
-                        <div>{t._pct != null ? pct(t._pct) : "—"}</div>
-                        {t._day?.close != null && <div className="muted" style={{ fontSize: 11 }}>{rupees(t._day.close)}</div>}
-                      </td>
-                      {[["low", "_low"], ["high", "_high"]].map(([which]) => {
-                        const v = dayExtremePct(t, t._day, which);
-                        const raw = t._day?.[which];
-                        return (
-                          <td key={which} className={`num ${v == null ? "" : v >= 0 ? "pos" : "neg"}`}>
-                            <div>{v != null ? pct(v) : "—"}</div>
-                            {raw != null && <div className="muted" style={{ fontSize: 11 }}>{rupees(raw)}</div>}
-                          </td>
-                        );
-                      })}
-                      {(() => {
-                        const b = w52[w52Key(t)];
-                        const bars = b?.bucket === "unknown" ? 0 : b?.bars;
-                        const title = b?.w52_low != null
-                          ? `From ${bars} trading day${bars === 1 ? "" : "s"} before the touch`
-                          : "Not enough prior history in the cached bhavcopy";
-                        return (
-                          <>
-                            <td className="num muted" title={title}>{b?.w52_low != null ? rupees(b.w52_low) : "—"}</td>
-                            <td className="num muted" title={title}>{b?.w52_high != null ? rupees(b.w52_high) : "—"}</td>
-                          </>
-                        );
-                      })()}
-                      <td>
-                        {t._pct == null ? (
-                          <span className="chip muted">no data</span>
-                        ) : (
-                          <span className={`tag ${t._pct < 0 ? "sell" : "buy"}`}>
-                            {t._pct < 0 ? "fell" : "rose"}
-                          </span>
-                        )}
-                      </td>
-                    </>
-                  )}
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
+                        {[["low", "_low"], ["high", "_high"]].map(([which]) => {
+                          const v = dayExtremePct(t, t._day, which);
+                          const raw = t._day?.[which];
+                          return (
+                            <td key={which} className={`num ${v == null ? "" : v >= 0 ? "pos" : "neg"}`}>
+                              <div>{v != null ? pct(v) : "—"}</div>
+                              {raw != null && <div className="muted" style={{ fontSize: 11 }}>{rupees(raw)}</div>}
+                            </td>
+                          );
+                        })}
+                        {(() => {
+                          const b = w52[w52Key(t)];
+                          const bars = b?.bucket === "unknown" ? 0 : b?.bars;
+                          const title = b?.w52_low != null
+                            ? `From ${bars} trading day${bars === 1 ? "" : "s"} before the touch`
+                            : "Not enough prior history in the cached bhavcopy";
+                          return (
+                            <>
+                              <td className="num muted" title={title}>{b?.w52_low != null ? rupees(b.w52_low) : "—"}</td>
+                              <td className="num muted" title={title}>{b?.w52_high != null ? rupees(b.w52_high) : "—"}</td>
+                            </>
+                          );
+                        })()}
+                        <td>
+                          {t._pct == null ? (
+                            <span className="chip muted">no data</span>
+                          ) : (
+                            <span className={`tag ${t._pct < 0 ? "sell" : "buy"}`}>
+                              {t._pct < 0 ? "fell" : "rose"}
+                            </span>
+                          )}
+                        </td>
+                      </>
+                    )}
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
       </section>
     </>
   );
@@ -1270,6 +1364,7 @@ function FilterDrawer({
     ["outcome", "Outcome", filters.outcome !== "all"],
     ["lowhigh", "Low / High", filters.low !== "all" || filters.high !== "all"],
     ["gap", "Gap", filters.gap.on],
+    ["segregation", "Segregation days", Object.keys(filters.segregation || {}).some(k => filters.segregation[k]?.type !== "none")],
     ["sort", "Sort by", !!sort.key],
   ];
 
@@ -1417,10 +1512,10 @@ function FilterDrawer({
 
             {tab === "cap" && (() => {
               const CAP_OPTS = [
-                { key: "large", label: "Large cap", note: "₹20,000 cr+" },
-                { key: "mid",   label: "Mid cap",   note: "₹5,000–20,000 cr" },
-                { key: "small", label: "Small cap",  note: "below ₹5,000 cr" },
-                { key: "unknown", label: "Unknown",  note: "not yet fetched" },
+                { key: "large", label: "Large cap", note: "Top 100 (SEBI / AMFI)" },
+                { key: "mid",   label: "Mid cap",   note: "Rank 101–250 (SEBI / AMFI)" },
+                { key: "small", label: "Small cap",  note: "Rank 251+ (SEBI / AMFI)" },
+                { key: "unknown", label: "Unknown",  note: "unclassified / other" },
               ];
               const countFor = (k) => rows.filter((t) => (caps[t.symbol] ?? "unknown") === k).length;
               const isAll = filters.cap.includes("all");
@@ -1667,6 +1762,50 @@ function FilterDrawer({
                 </>
               );
             })()}
+
+            {tab === "segregation" && (
+              <>
+                <p className="drawer-note" style={{ marginTop: 0, marginBottom: 12 }}>
+                  Filter touches based on individual follow-up day performance (offset trading days).
+                </p>
+                <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+                  {Array.from({ length: runFollowDays }, (_, i) => i + 1).map((day) => {
+                    const cond = filters.segregation?.[day] || { type: "none", pct: "" };
+                    const setSeg = (patch) => {
+                      const nextSeg = { ...filters.segregation, [day]: { ...cond, ...patch } };
+                      set({ segregation: nextSeg });
+                    };
+                    return (
+                      <div key={day} className="row" style={{ alignItems: "center", gap: 8 }}>
+                        <span style={{ fontWeight: 600, width: 55, fontSize: 13 }}>Day {day}:</span>
+                        <select
+                          value={cond.type}
+                          onChange={(e) => setSeg({ type: e.target.value })}
+                          style={{ width: 110 }}
+                        >
+                          <option value="none">None</option>
+                          <option value="up">Up (≥</option>
+                          <option value="down">Down (≥</option>
+                        </select>
+                        <input
+                          type="number"
+                          step="0.1"
+                          placeholder="e.g. 5.0"
+                          value={cond.pct}
+                          onChange={(e) => setSeg({ pct: e.target.value === "" ? "" : Number(e.target.value) })}
+                          disabled={cond.type === "none"}
+                          style={{ flex: 1, marginBottom: 0 }}
+                        />
+                        <span style={{ fontSize: 13 }}>%</span>
+                      </div>
+                    );
+                  })}
+                </div>
+                <p className="drawer-note" style={{ marginTop: 12 }}>
+                  <strong>These only hide table rows — the panel above is untouched.</strong> Like Outcome, the follow-up day performance is known only after the touch, so it is not a predictor.
+                </p>
+              </>
+            )}
 
             {tab === "sort" && (
               <>

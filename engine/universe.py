@@ -26,6 +26,7 @@ still runs (just over fewer stocks) instead of breaking.
 
 from __future__ import annotations
 
+from datetime import datetime, date
 import csv
 import io
 import os
@@ -50,35 +51,50 @@ _HEADERS = {
 }
 
 
+def parse_listing_date(raw: str) -> str | None:
+    """Normalize a listing date string from NSE or elsewhere to ISO YYYY-MM-DD."""
+    if not raw or not raw.strip():
+        return None
+    s = raw.strip()
+    for fmt in ("%d-%b-%Y", "%d-%B-%Y", "%d-%m-%Y", "%Y-%m-%d", "%d/%m/%Y", "%Y/%m/%d"):
+        try:
+            return datetime.strptime(s, fmt).date().isoformat()
+        except ValueError:
+            continue
+    return None
+
+
 def _bundled_fallback() -> list[dict]:
     """The curated symbols.py list, shaped like the CSV rows. Used when the live
     download fails so a scan still has *something* to cover."""
     return [
-        {"symbol": sym, "name": name, "series": "EQ"}
+        {"symbol": sym, "name": name, "series": "EQ", "listing_date": ""}
         for sym, name, _sector in symbol_directory.SYMBOLS
     ]
 
 
 def _parse_csv(text: str) -> list[dict]:
-    """Parse EQUITY_L.csv into [{symbol, name, series}].
+    """Parse EQUITY_L.csv into [{symbol, name, series, listing_date}].
 
     Columns (as published): SYMBOL, NAME OF COMPANY, SERIES, DATE OF LISTING,
-    PAID UP VALUE, MARKET LOT, ISIN NUMBER, FACE VALUE. We keep only the EQ
-    series — the normal rolling-settlement equity segment. BE/BZ/etc. are
-    surveillance/illiquid segments we don't want to short on a mean-reversion bet.
+    PAID UP VALUE, MARKET LOT, ISIN NUMBER, FACE VALUE.
     """
     rows: list[dict] = []
     reader = csv.DictReader(io.StringIO(text))
     for raw in reader:
         # Keys can carry stray whitespace in NSE's CSV — normalize them.
         row = {(k or "").strip(): (v or "").strip() for k, v in raw.items()}
-        series = row.get("SERIES", "").upper()
-        if series and series != "EQ":
-            continue
         sym = row.get("SYMBOL", "").upper()
         if not sym:
             continue
-        rows.append({"symbol": sym, "name": row.get("NAME OF COMPANY", sym), "series": series or "EQ"})
+        series = row.get("SERIES", "").upper() or "EQ"
+        listing_date = parse_listing_date(row.get("DATE OF LISTING", "")) or ""
+        rows.append({
+            "symbol": sym,
+            "name": row.get("NAME OF COMPANY", sym),
+            "series": series,
+            "listing_date": listing_date,
+        })
     return rows
 
 
@@ -103,18 +119,27 @@ def _download() -> list[dict]:
 def _write_cache(cache_path: str, rows: list[dict]) -> None:
     os.makedirs(os.path.dirname(os.path.abspath(cache_path)), exist_ok=True)
     with open(cache_path, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=["symbol", "name", "series"])
+        writer = csv.DictWriter(f, fieldnames=["symbol", "name", "series", "listing_date"], extrasaction="ignore")
         writer.writeheader()
         writer.writerows(rows)
 
 
 def _read_cache(cache_path: str) -> list[dict]:
     with open(cache_path, "r", newline="", encoding="utf-8") as f:
-        return [dict(r) for r in csv.DictReader(f)]
+        rows = []
+        for r in csv.DictReader(f):
+            d = dict(r)
+            d.setdefault("listing_date", "")
+            rows.append(d)
+        return rows
+
+
+def _has_listing_dates(rows: list[dict]) -> bool:
+    return any(bool(r.get("listing_date")) for r in rows)
 
 
 def load_universe(cache_path: str, force_refresh: bool = False) -> tuple[list[dict], str]:
-    """Return (rows, source) where rows is [{symbol, name, series}] and source is
+    """Return (rows, source) where rows is [{symbol, name, series, listing_date}] and source is
     one of "cache" | "download" | "bundled" so the caller can tell the user how
     complete the scan universe is.
 
@@ -157,3 +182,20 @@ def symbols_only(cache_path: str, force_refresh: bool = False) -> list[str]:
     """Just the ticker list, for callers that don't need names."""
     rows, _source = load_universe(cache_path, force_refresh)
     return [r["symbol"] for r in rows]
+
+
+def listing_dates_for(symbols: list[str] | set[str], cache_path: str) -> dict[str, str]:
+    """Return {symbol: "YYYY-MM-DD"} for requested symbols from the cached universe."""
+    wanted = {s.strip().upper() for s in symbols if s}
+    if not wanted:
+        return {}
+    rows, _ = load_universe(cache_path)
+    out: dict[str, str] = {}
+    for r in rows:
+        sym = r.get("symbol", "").upper()
+        if sym in wanted:
+            ld = (r.get("listing_date") or "").strip()
+            if ld:
+                out[sym] = ld
+    return out
+

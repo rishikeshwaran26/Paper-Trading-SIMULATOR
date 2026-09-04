@@ -147,65 +147,136 @@ def scan():
     if band_low < 0 or band_low > band_high:
         return jsonify(error="band_low must be between 0 and band_high"), 400
 
+    before_days = int(body.get("before_days", 0))
+    follow_up_days = int(body.get("follow_up_days", 0))
+
+    margin_before = before_days * 3 + 10 if before_days > 0 else 0
+    margin_after = follow_up_days * 3 + 10 if follow_up_days > 0 else 0
+    ext_start = start - timedelta(days=margin_before)
+    ext_end = end + timedelta(days=margin_after)
+
     names = symbol_names()
     up_hits = []
     down_hits = []
-    trading_days = 0
     missing_days = []
-    traded_dates = []  # every date that actually had a bhavcopy file, in order
+    all_trading_days = []
+    day_cache = {}
 
-    d = start
-    while d <= end:
-        rows = fetch_day(CACHE_DIR, d)
+    curr = ext_start
+    while curr <= ext_end:
+        rows = fetch_day(CACHE_DIR, curr)
         if rows is None:
-            # Either a real non-trading day (weekend/holiday) or a fetch
-            # failure — fetch_day doesn't distinguish, so we can't either.
-            # Weekends are the overwhelming majority of these and are
-            # expected, so this is reported as a count, not an error list.
-            missing_days.append(d.isoformat())
-            d += timedelta(days=1)
+            if start <= curr <= end:
+                missing_days.append(curr.isoformat())
+            curr += timedelta(days=1)
             continue
-        trading_days += 1
-        traded_dates.append(d.isoformat())
+        
+        date_str = curr.isoformat()
+        all_trading_days.append(date_str)
+        day_cache[date_str] = {}
         for row in rows:
             try:
                 sym = row["SYMBOL"].strip().upper()
-                high = float(row["HIGH_PRICE"])
-                low = float(row["LOW_PRICE"])
-                close = float(row["CLOSE_PRICE"])
-                prev_close = float(row["PREV_CLOSE"])
+                day_cache[date_str][sym] = {
+                    "close": float(row["CLOSE_PRICE"]),
+                    "prev_close": float(row["PREV_CLOSE"]),
+                    "high": float(row["HIGH_PRICE"]),
+                    "low": float(row["LOW_PRICE"]),
+                }
             except (KeyError, ValueError):
                 continue
+        curr += timedelta(days=1)
+
+    scan_trading_days = [d for d in all_trading_days if start.isoformat() <= d <= end.isoformat()]
+    trading_days = len(scan_trading_days)
+    traded_dates = scan_trading_days
+
+    for date_str in scan_trading_days:
+        symbols_data = day_cache[date_str]
+        for sym, row in symbols_data.items():
+            high = row["high"]
+            low = row["low"]
+            close = row["close"]
+            prev_close = row["prev_close"]
             if prev_close <= 0:
                 continue
-            hit = {"symbol": sym, "name": names.get(sym, ""), "date": d.isoformat()}
-            # Rounded BEFORE the band test, not after, and the rounded value is
-            # what gets compared and reported. A stock locked at the +20%
-            # circuit is mathematically exactly 20%, but in binary floating
-            # point (732.60 - 610.50) / 610.50 * 100 lands on 20.000000000000004
-            # — a hair outside a 19–20 band, so it vanished from the scan while
-            # a neighbour at the same circuit stayed. That silently dropped 43%
-            # of every exact-20% touch, which is most of what this tool is for.
-            # The main app already compares the rounded value; this matches it.
+
+            hit = {"symbol": sym, "name": names.get(sym, ""), "date": date_str}
             close_pct = round((close - prev_close) / prev_close * 100, 2)
 
             up_pct = round((high - prev_close) / prev_close * 100, 2)
             if band_low <= up_pct <= band_high:
-                # Closed at (within a whisker of) the day's high it touched:
-                # almost always means it FROZE there — locked at the upper
-                # circuit for the rest of the session, only buyers left, no
-                # sellers to trade into. |up_pct - close_pct| <= 0.15 is the
-                # same tolerance the main app uses for this.
                 frozen = abs(up_pct - close_pct) <= 0.15
-                up_hits.append({**hit, "pct": up_pct, "close_pct": close_pct, "frozen": frozen})
+                
+                before_perf = []
+                follow_up_perf = []
+                idx = all_trading_days.index(date_str)
+                
+                if before_days > 0:
+                    start_idx = max(0, idx - before_days)
+                    for b_date in all_trading_days[start_idx:idx]:
+                        b_row = day_cache[b_date].get(sym)
+                        if b_row and b_row["prev_close"] > 0:
+                            b_pct = round((b_row["close"] - b_row["prev_close"]) / b_row["prev_close"] * 100, 2)
+                            before_perf.append({"date": b_date, "pct": b_pct})
+                        else:
+                            before_perf.append({"date": b_date, "pct": None})
+                
+                if follow_up_days > 0:
+                    end_idx = min(len(all_trading_days), idx + 1 + follow_up_days)
+                    for f_date in all_trading_days[idx + 1:end_idx]:
+                        f_row = day_cache[f_date].get(sym)
+                        if f_row and f_row["prev_close"] > 0:
+                            f_pct = round((f_row["close"] - f_row["prev_close"]) / f_row["prev_close"] * 100, 2)
+                            follow_up_perf.append({"date": f_date, "pct": f_pct})
+                        else:
+                            follow_up_perf.append({"date": f_date, "pct": None})
+
+                up_hits.append({
+                    **hit,
+                    "pct": up_pct,
+                    "close_pct": close_pct,
+                    "frozen": frozen,
+                    "before_perf": before_perf,
+                    "follow_up_perf": follow_up_perf
+                })
 
             down_pct = round((low - prev_close) / prev_close * 100, 2)
             if -band_high <= down_pct <= -band_low:
-                # Same idea on the way down — closed at its low, frozen at the
-                # lower circuit.
                 frozen = abs(down_pct - close_pct) <= 0.15
-                down_hits.append({**hit, "pct": down_pct, "close_pct": close_pct, "frozen": frozen})
-        d += timedelta(days=1)
+                
+                before_perf = []
+                follow_up_perf = []
+                idx = all_trading_days.index(date_str)
+                
+                if before_days > 0:
+                    start_idx = max(0, idx - before_days)
+                    for b_date in all_trading_days[start_idx:idx]:
+                        b_row = day_cache[b_date].get(sym)
+                        if b_row and b_row["prev_close"] > 0:
+                            b_pct = round((b_row["close"] - b_row["prev_close"]) / b_row["prev_close"] * 100, 2)
+                            before_perf.append({"date": b_date, "pct": b_pct})
+                        else:
+                            before_perf.append({"date": b_date, "pct": None})
+                
+                if follow_up_days > 0:
+                    end_idx = min(len(all_trading_days), idx + 1 + follow_up_days)
+                    for f_date in all_trading_days[idx + 1:end_idx]:
+                        f_row = day_cache[f_date].get(sym)
+                        if f_row and f_row["prev_close"] > 0:
+                            f_pct = round((f_row["close"] - f_row["prev_close"]) / f_row["prev_close"] * 100, 2)
+                            follow_up_perf.append({"date": f_date, "pct": f_pct})
+                        else:
+                            follow_up_perf.append({"date": f_date, "pct": None})
+
+                down_hits.append({
+                    **hit,
+                    "pct": down_pct,
+                    "close_pct": close_pct,
+                    "frozen": frozen,
+                    "before_perf": before_perf,
+                    "follow_up_perf": follow_up_perf
+                })
 
     # Biggest move first within each list — the touches most worth a second
     # look surface without any client-side sorting.

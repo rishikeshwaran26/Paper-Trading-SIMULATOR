@@ -171,7 +171,44 @@ button:focus-visible, a:focus-visible { outline-offset: 3px; }
 .two-col { display: grid; grid-template-columns: 1fr 360px; gap: 22px; align-items: start; }
 @media (max-width: 860px) { .two-col { grid-template-columns: 1fr; } }
 
-/* --- tables ---------------------------------------------------------------- */
+/* --- tables & horizontal sliding container --------------------------------- */
+.table-wrap {
+  width: 100%;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel);
+  box-shadow: var(--shadow);
+  position: relative;
+  scrollbar-width: thin;
+  scrollbar-color: #cbd5e1 transparent;
+}
+.table-wrap::-webkit-scrollbar {
+  height: 8px;
+  width: 8px;
+}
+.table-wrap::-webkit-scrollbar-track {
+  background: var(--panel-2);
+  border-radius: 4px;
+}
+.table-wrap::-webkit-scrollbar-thumb {
+  background: #cbd5e1;
+  border-radius: 4px;
+}
+.table-wrap::-webkit-scrollbar-thumb:hover {
+  background: #94a3b8;
+}
+
+.table-wrap .table {
+  border: none;
+  border-radius: 0;
+  box-shadow: none;
+  width: max-content;
+  min-width: 100%;
+  margin: 0;
+}
+
 .table {
   width: 100%; border-collapse: separate; border-spacing: 0; background: var(--panel);
   border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden;
@@ -201,6 +238,7 @@ button:focus-visible, a:focus-visible { outline-offset: 3px; }
 .tag.cap-large { background: #1a3a5c22; color: #3b82f6; margin-left: 6px; font-weight: 600; }
 .tag.cap-mid   { background: #3a1a5c22; color: #a855f7; margin-left: 6px; font-weight: 600; }
 .tag.cap-small { background: #1a3a1a22; color: #22c55e; margin-left: 6px; font-weight: 600; }
+.tag.age-tag   { background: #1a2a3a14; color: #475569; margin-left: 6px; font-weight: 600; font-size: 11px; }
 /* 52-week position: the one place a touch's context earns colour, so it reads
    at a glance next to the neutral cap badge. */
 .tag.w52-high { background: var(--pos-soft); color: var(--pos); margin-left: 6px; font-weight: 600; }
@@ -375,9 +413,73 @@ a.small:hover { background: var(--panel-hover); }
 .progress-fill { height: 100%; border-radius: 999px; transition: width .4s var(--ease); background: var(--accent); }
 
 /* --- data table (shared by Backtest's results table) ------------------------ */
+.screener-table {
+  width: max-content;
+  min-width: 100%;
+}
 .screener-table th.sortable { cursor: pointer; user-select: none; white-space: nowrap; transition: color .12s var(--ease); }
 .screener-table th.sortable:hover { color: var(--text); }
 .screener-table td { vertical-align: middle; }
+
+/* Sticky Symbol column on the left */
+.screener-table th:first-child,
+.screener-table td:first-child {
+  position: sticky;
+  left: 0;
+  background: var(--panel);
+  z-index: 2;
+  min-width: 220px;
+  max-width: 280px;
+  border-right: 1px solid var(--line);
+  box-shadow: 3px 0 6px -2px rgba(0, 0, 0, 0.08);
+}
+.screener-table th:first-child {
+  background: var(--panel-2);
+  z-index: 3;
+}
+.screener-table tbody tr:hover td:first-child {
+  background: #fafafa;
+}
+
+/* Compact symbol & badge formatting */
+.symbol-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.symbol-cell-top {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.symbol-tags {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 3px;
+}
+.symbol-tags .tag {
+  margin-left: 0;
+  padding: 1.5px 6px;
+  font-size: 10.5px;
+  line-height: 1.3;
+}
+.symbol-company-name {
+  font-size: 11.5px;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 240px;
+}
+
+.screener-table th.num,
+.screener-table td.num {
+  white-space: nowrap;
+  min-width: 66px;
+}
+
 .logo-avatar {
   display: inline-flex; align-items: center; justify-content: center;
   width: 30px; height: 30px; border-radius: 50%; color: #fff; font-weight: 700;

@@ -743,6 +743,27 @@ def band_study_run_week52(run_id: int):
     return jsonify({"week52": labels})
 
 
+@bp.get("/band-study/runs/<int:run_id>/listing-dates")
+@require_auth
+def band_study_run_listing_dates(run_id: int):
+    """Return {symbol: listing_date} for every symbol touched in this run.
+
+    Read from the cached NSE universe master. Served as a separate endpoint
+    so the main run loads immediately and listing age appears instantly.
+    """
+    from engine.universe import listing_dates_for
+
+    detail = _band_study_repo().get_run(run_id)
+    if detail is None:
+        raise ApiError(404, "NotFound", f"no band study run with id {run_id}")
+    touches = detail.get("touches") or []
+    syms = list({t["symbol"] for t in touches})
+    data_root = current_app.config.get("DATA_ROOT", "data")
+    cache_path = universe_cache_path(data_root)
+    listing_dates = listing_dates_for(syms, cache_path)
+    return jsonify({"listing_dates": listing_dates})
+
+
 # --- trading-day calendar (the nav's month grid) -----------------------------
 # Months currently being fetched in the background, so two requests for the
 # same uncached month (e.g. a page reload before the first warm-up finishes)

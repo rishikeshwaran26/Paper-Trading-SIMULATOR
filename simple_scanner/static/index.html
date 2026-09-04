@@ -175,11 +175,21 @@
         </div>
       </div>
     </div>
-
     <div id="singleFields" style="display:none">
       <label>Touched at least (%)</label>
       <input type="number" id="threshold" value="20" step="0.1">
       <p class="hint">No upper limit — counts anything at or above this move, either direction.</p>
+    </div>
+
+    <div class="row">
+      <div>
+        <label>Before Days (history)</label>
+        <input type="number" id="beforeDays" value="5" min="0" max="20">
+      </div>
+      <div>
+        <label>Follow-up Days</label>
+        <input type="number" id="followUpDays" value="5" min="0" max="20">
+      </div>
     </div>
 
     <button class="primary" id="scanBtn">Scan</button>
@@ -255,6 +265,13 @@
       <label class="cap-chip" data-dow="3"><input type="checkbox"> Wed</label>
       <label class="cap-chip" data-dow="4"><input type="checkbox"> Thu</label>
       <label class="cap-chip" data-dow="5"><input type="checkbox"> Fri</label>
+    </div>
+  </div>
+
+  <div style="margin-top:12px;display:none" id="segregationFilterWrap">
+    <label>Segregation Days (Follow-up Filter)</label>
+    <div id="segregationFilterContainer" style="display:flex; flex-direction:column; gap:8px; margin-top:8px;">
+      <!-- Dynamically generated Day rows will be inserted here -->
     </div>
   </div>
 
@@ -394,12 +411,98 @@
     return hits.filter((h) => dowGroup.matches(String(new Date(h.date).getUTCDay())));
   }
 
+  function filterBySegregation(hits) {
+    const followUpDaysVal = parseInt($("followUpDays").value) || 0;
+    if (followUpDaysVal <= 0) return hits;
+
+    return hits.filter((h) => {
+      if (!h.follow_up_perf || h.follow_up_perf.length === 0) return true;
+      for (let i = 0; i < followUpDaysVal; i++) {
+        const typeEl = $(`seg_type_${i}`);
+        const valEl = $(`seg_val_${i}`);
+        if (!typeEl || !valEl) continue;
+
+        const condType = typeEl.value; // "none", "up", "down"
+        const condVal = parseFloat(valEl.value);
+        if (condType === "none" || isNaN(condVal)) continue;
+
+        const perf = h.follow_up_perf[i];
+        if (!perf || perf.pct === null || perf.pct === undefined) {
+          return false;
+        }
+
+        if (condType === "up" && perf.pct < condVal) {
+          return false;
+        }
+        if (condType === "down" && perf.pct > -condVal) {
+          return false;
+        }
+      }
+      return true;
+    });
+  }
+
+  function generateSegregationFilters(count) {
+    const container = $("segregationFilterContainer");
+    container.innerHTML = "";
+    if (count <= 0) {
+      $("segregationFilterWrap").style.display = "none";
+      return;
+    }
+    $("segregationFilterWrap").style.display = "block";
+
+    for (let i = 0; i < count; i++) {
+      const row = document.createElement("div");
+      row.style.display = "flex";
+      row.style.alignItems = "center";
+      row.style.gap = "8px";
+      row.style.marginBottom = "4px";
+
+      const label = document.createElement("span");
+      label.textContent = `Day ${i + 1}:`;
+      label.style.width = "55px";
+      label.style.fontSize = "13px";
+      label.style.fontWeight = "600";
+
+      const typeSelect = document.createElement("select");
+      typeSelect.id = `seg_type_${i}`;
+      typeSelect.style.width = "100px";
+      typeSelect.style.padding = "6px 8px";
+      typeSelect.innerHTML = `
+        <option value="none">None</option>
+        <option value="up">Up (>)</option>
+        <option value="down">Down (>)</option>
+      `;
+      typeSelect.onchange = refreshLists;
+
+      const valInput = document.createElement("input");
+      valInput.id = `seg_val_${i}`;
+      valInput.type = "number";
+      valInput.step = "0.1";
+      valInput.placeholder = "e.g. 5.0";
+      valInput.style.flex = "1";
+      valInput.style.padding = "6px 8px";
+      valInput.style.marginBottom = "0";
+      valInput.oninput = refreshLists;
+
+      const pctSign = document.createElement("span");
+      pctSign.textContent = "%";
+      pctSign.style.fontSize = "13px";
+
+      row.appendChild(label);
+      row.appendChild(typeSelect);
+      row.appendChild(valInput);
+      row.appendChild(pctSign);
+      container.appendChild(row);
+    }
+  }
+
   // Re-applies the current sort + filter controls to both lists, without
   // touching the server — called on every scan result and every control change.
   function refreshLists() {
     const sortBy = $("sortBy").value;
     const text = $("filterText").value;
-    const prep = (hits, dir) => sortHits(filterByDow(filterByFreeze(filterByCap(filterHits(hits, text)))), sortBy, dir);
+    const prep = (hits, dir) => sortHits(filterBySegregation(filterByDow(filterByFreeze(filterByCap(filterHits(hits, text))))), sortBy, dir);
     renderHits("upList", prep(lastUp, "up"), "up");
     renderHits("downList", prep(lastDown, "down"), "down");
   }
@@ -439,6 +542,8 @@
         const badge = document.createElement("span");
         badge.className = `cap-badge ${h.cap}`;
         badge.textContent = h.cap === "unknown" ? "cap n/a" : `${h.cap} cap`;
+        const capDesc = h.cap === "large" ? "Top 100 (SEBI / AMFI)" : (h.cap === "mid" ? "Rank 101–250 (SEBI / AMFI)" : (h.cap === "small" ? "Rank 251+ (SEBI / AMFI)" : "Unclassified"));
+        badge.title = `${h.cap} cap — ${capDesc}`;
         left.appendChild(badge);
       }
       if (h.frozen) {
@@ -447,6 +552,36 @@
         fz.textContent = "frozen";
         fz.title = `Closed at ${h.close_pct > 0 ? "+" : ""}${h.close_pct}% — the same move it touched, so it locked there for the rest of the session`;
         left.appendChild(fz);
+      }
+
+      if (h.before_perf && h.before_perf.length > 0) {
+        const bDiv = document.createElement("div");
+        bDiv.className = "name";
+        bDiv.style.marginTop = "4px";
+        bDiv.style.fontSize = "11px";
+        bDiv.style.color = "var(--muted)";
+        const bParts = h.before_perf.map((p, idx) => {
+          if (p.pct === null || p.pct === undefined) return `B${idx+1}: n/a`;
+          const sign = p.pct > 0 ? "+" : "";
+          return `B${idx+1}: ${sign}${p.pct}%`;
+        });
+        bDiv.textContent = "Before: " + bParts.join(" | ");
+        left.appendChild(bDiv);
+      }
+
+      if (h.follow_up_perf && h.follow_up_perf.length > 0) {
+        const fDiv = document.createElement("div");
+        fDiv.className = "name";
+        fDiv.style.marginTop = "2px";
+        fDiv.style.fontSize = "11px";
+        fDiv.style.color = "var(--muted)";
+        const fParts = h.follow_up_perf.map((p, idx) => {
+          if (p.pct === null || p.pct === undefined) return `D${idx+1}: n/a`;
+          const sign = p.pct > 0 ? "+" : "";
+          return `D${idx+1}: ${sign}${p.pct}%`;
+        });
+        fDiv.textContent = "Follow-up: " + fParts.join(" | ");
+        left.appendChild(fDiv);
       }
 
       const right = document.createElement("div");
@@ -474,6 +609,7 @@
     $("capFilterWrap").style.display = "none";
     $("freezeFilterWrap").style.display = "none";
     $("dowFilterWrap").style.display = "none";
+    $("segregationFilterWrap").style.display = "none";
     $("meta").textContent = "";
     $("exportsWrap").style.display = "none";
     $("exportsErr").style.display = "none";
@@ -483,6 +619,8 @@
       start_date: oneDay ? $("oneDate").value : $("startDate").value,
       end_date: oneDay ? $("oneDate").value : $("endDate").value,
       mode,
+      before_days: Number($("beforeDays").value) || 0,
+      follow_up_days: Number($("followUpDays").value) || 0,
     };
     if (mode === "band") {
       payload.band_low = Number($("bandLow").value);
@@ -522,6 +660,7 @@
 
       lastUp = d.up_hits || [];
       lastDown = d.down_hits || [];
+      generateSegregationFilters(payload.follow_up_days);
       $("sortBy").value = "pct";
       $("filterText").value = "";
       capGroup.reset();
@@ -532,6 +671,9 @@
       $("capFilterWrap").style.display = "block";
       $("freezeFilterWrap").style.display = "block";
       $("dowFilterWrap").style.display = "block";
+      if (payload.follow_up_days > 0) {
+        $("segregationFilterWrap").style.display = "block";
+      }
     } catch (e) {
       $("err").textContent = e.message;
       $("err").style.display = "block";
