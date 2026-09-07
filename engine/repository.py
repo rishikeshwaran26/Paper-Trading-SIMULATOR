@@ -975,3 +975,96 @@ class TrackerRepository:
             "refreshed_at": r["refreshed_at"],
             "created_at": r["created_at"],
         }
+
+
+# --- saved patterns ----------------------------------------------------------
+class SavedPatternRepository:
+    """Persistence for user-saved backtest patterns.
+
+    A saved pattern records the filter combination, date range, and outcome
+    statistics from one Backtest Report so the user can revisit and compare
+    patterns later in the Pattern Library.
+
+    Not user-scoped: a pattern describes a market observation (e.g. "stocks
+    that rose 19-20% on high volume reverted 68% of the time in Jan-Mar 2026")
+    rather than a personal account action — same reasoning as BacktestRepository
+    and BandStudyRepository.
+    """
+
+    def __init__(self, db_path: str):
+        self.db_path = db_path
+
+    def create(
+        self,
+        name: str,
+        test_start_date: str,
+        test_end_date: str,
+        cases: int,
+        fell_count: int,
+        rose_count: int,
+        fall_rate: float,
+        filters: dict,
+        status: str = "discovered",
+    ) -> int:
+        """Insert one saved pattern and return its new integer ID.
+
+        `filters` is a Python dict; it is serialised to JSON for storage.
+        `created_at` is set to now (UTC ISO-8601) by this method — the caller
+        does not need to supply it.
+
+        Returns the AUTOINCREMENT id of the newly created row.
+        """
+        created_at = _now()
+        with transaction(self.db_path) as conn:
+            cur = conn.execute(
+                """INSERT INTO saved_patterns
+                   (name, test_start_date, test_end_date, cases,
+                    fell_count, rose_count, fall_rate, filters, created_at, status)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    name,
+                    test_start_date,
+                    test_end_date,
+                    cases,
+                    fell_count,
+                    rose_count,
+                    fall_rate,
+                    json.dumps(filters),
+                    created_at,
+                    status,
+                ),
+            )
+            return cur.lastrowid
+
+    def get(self, pattern_id: int) -> Optional[dict]:
+        """Return one pattern as a dict, or None if not found."""
+        with transaction(self.db_path) as conn:
+            row = conn.execute(
+                "SELECT * FROM saved_patterns WHERE id = ?", (pattern_id,)
+            ).fetchone()
+        return self._shape(row) if row else None
+
+    def list_all(self, limit: int = 100) -> list[dict]:
+        """All saved patterns, newest first."""
+        with transaction(self.db_path) as conn:
+            rows = conn.execute(
+                "SELECT * FROM saved_patterns ORDER BY created_at DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [self._shape(r) for r in rows]
+
+    @staticmethod
+    def _shape(r) -> dict:
+        return {
+            "id": r["id"],
+            "name": r["name"],
+            "test_start_date": r["test_start_date"],
+            "test_end_date": r["test_end_date"],
+            "cases": r["cases"],
+            "fell_count": r["fell_count"],
+            "rose_count": r["rose_count"],
+            "fall_rate": r["fall_rate"],
+            "filters": json.loads(r["filters"] or "{}"),
+            "created_at": r["created_at"],
+            "status": r["status"],
+        }

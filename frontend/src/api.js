@@ -150,4 +150,7 @@ export const api = {
 
   // trading-day calendar (nav widget)
   calendarMonth: (year, month) => request(`/calendar/month?year=${year}&month=${month}`),
+
+  // saved patterns (Pattern Library)
+  savePattern: (payload) => request("/patterns", { method: "POST", body: JSON.stringify(payload) }),
 };

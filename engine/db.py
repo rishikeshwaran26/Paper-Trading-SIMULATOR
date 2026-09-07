@@ -316,6 +316,23 @@ CREATE TABLE IF NOT EXISTS tracked_touches (
     UNIQUE (user_id, symbol, touch_date)
 );
 CREATE INDEX IF NOT EXISTS idx_tracked_user ON tracked_touches(user_id, touch_date);
+
+-- Saved backtest patterns: records a specific combination of filters, test date
+-- range, and resulting stats from the backtest report for later discovery/lookup.
+CREATE TABLE IF NOT EXISTS saved_patterns (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    name            TEXT    NOT NULL,
+    test_start_date TEXT    NOT NULL,
+    test_end_date   TEXT    NOT NULL,
+    cases           INTEGER NOT NULL,
+    fell_count      INTEGER NOT NULL,
+    rose_count      INTEGER NOT NULL,
+    fall_rate       REAL    NOT NULL,
+    filters         TEXT    NOT NULL,
+    created_at      TEXT    NOT NULL,
+    status          TEXT    NOT NULL DEFAULT 'discovered'
+);
+CREATE INDEX IF NOT EXISTS idx_saved_patterns_created ON saved_patterns(created_at DESC);
 """
 
 # Columns added to backtest_movers after its first release.

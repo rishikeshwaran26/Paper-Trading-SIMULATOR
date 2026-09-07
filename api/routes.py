@@ -46,7 +46,7 @@ from engine.journal import (
 )
 from engine.manager import DEFAULT_STARTING_CASH
 from engine.portfolio import Portfolio
-from engine.repository import BacktestRepository, BandStudyRepository
+from engine.repository import BacktestRepository, BandStudyRepository, SavedPatternRepository
 
 from .auth import require_auth
 from .errors import ApiError
@@ -533,6 +533,11 @@ def _backtest_repo() -> BacktestRepository:
     return BacktestRepository(db_file(g.data.root))
 
 
+# --- saved patterns (not user-scoped for the same reason) --------------------
+def _pattern_repo() -> SavedPatternRepository:
+    return SavedPatternRepository(db_file(g.data.root))
+
+
 @bp.post("/backtest/run")
 @require_auth
 def start_backtest():
@@ -973,3 +978,82 @@ def set_price(symbol: str):
             "triggered": [a.to_dict() for a in fired],
         }
     )
+
+
+# --- saved patterns ----------------------------------------------------------
+@bp.post("/patterns")
+@require_auth
+def create_pattern():
+    """Save one Backtest pattern for later discovery.
+
+    Accepts the filter combination, date range, and outcome statistics from a
+    Backtest Report. Returns the newly created pattern ID so the frontend can
+    link directly to it in the Pattern Library.
+
+    Not user-scoped: a pattern is a market observation, same reasoning as
+    backtest runs and band-study runs.
+    """
+    body = json_body()
+    name           = req_str(body, "name")
+    start_date     = req_str(body, "test_start_date")
+    end_date       = req_str(body, "test_end_date")
+    cases          = req_int(body, "cases")
+    fell_count     = req_int(body, "fell_count")
+    rose_count     = req_int(body, "rose_count")
+    fall_rate      = req_num(body, "fall_rate")
+
+    # `filters` must be a JSON object, not a scalar — the req_* helpers don't
+    # cover dict, so we check it explicitly here.
+    filters = body.get("filters")
+    if not isinstance(filters, dict):
+        raise ApiError(400, "BadRequest", "'filters' is required and must be a JSON object")
+
+    # Semantic checks: counts must be non-negative and consistent.
+    if cases < 0:
+        raise ApiError(400, "BadRequest", "'cases' must be non-negative")
+    if fell_count < 0 or rose_count < 0:
+        raise ApiError(400, "BadRequest", "'fell_count' and 'rose_count' must be non-negative")
+    if fell_count + rose_count > cases:
+        raise ApiError(
+            400, "BadRequest",
+            "'fell_count' + 'rose_count' cannot exceed 'cases'",
+        )
+    if not (0.0 <= fall_rate <= 1.0):
+        raise ApiError(400, "BadRequest", "'fall_rate' must be between 0.0 and 1.0")
+
+    # ISO-date sanity: both dates must parse and start must not be after end.
+    try:
+        sd = date.fromisoformat(start_date)
+        ed = date.fromisoformat(end_date)
+    except ValueError:
+        raise ApiError(
+            400, "BadRequest",
+            "'test_start_date' and 'test_end_date' must be ISO dates, e.g. '2026-01-01'",
+        )
+    if sd > ed:
+        raise ApiError(400, "BadRequest", "'test_start_date' must not be after 'test_end_date'")
+
+    pattern_id = _pattern_repo().create(
+        name=name,
+        test_start_date=start_date,
+        test_end_date=end_date,
+        cases=cases,
+        fell_count=fell_count,
+        rose_count=rose_count,
+        fall_rate=fall_rate,
+        filters=filters,
+    )
+
+    pattern = _pattern_repo().get(pattern_id)
+    resp = jsonify({"pattern": pattern})
+    resp.status_code = 201
+    resp.headers["Location"] = f"/patterns/{pattern_id}"
+    return resp
+
+
+@bp.get("/patterns")
+@require_auth
+def list_patterns():
+    """List all saved patterns, newest first."""
+    return jsonify({"patterns": _pattern_repo().list_all()})
+

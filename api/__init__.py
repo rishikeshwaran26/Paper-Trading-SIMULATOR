@@ -162,6 +162,8 @@ def create_app(
                     "GET    /band-study/status",
                     "GET    /band-study/runs",
                     "GET    /band-study/runs/<id>",
+                    "POST   /patterns",
+                    "GET    /patterns",
                 ],
             }
         )

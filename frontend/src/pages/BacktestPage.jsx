@@ -822,6 +822,7 @@ function BandStudy({ singleDate }) {
           caps={caps}
           w52={w52}
           listingDates={listingDates}
+          filters={filters}
         />
       )}
 
@@ -856,7 +857,7 @@ function BandStudy({ singleDate }) {
 function BandStudyResult({
   run, touches, predictionTouches, totalCount, viewOnlyFilters, beforeMoveOn, lockedExcluded, metric, onMetric,
   onSort, sortArrow, viewDay, onViewDay, followDays, beforeDays,
-  findDay, onOpenFilters, activeFilterCount, caps, w52, listingDates = {},
+  findDay, onOpenFilters, activeFilterCount, caps, w52, listingDates = {}, filters,
 }) {
   const flaggedCount = touches.filter((t) => t.corporate_action_suspected).length;
   const dayOffsets = Array.from({ length: followDays }, (_, i) => i + 1);
@@ -879,6 +880,61 @@ function BandStudyResult({
   // "All days" has no single day to score, so the panel falls back to day +1.
   const panel = showingAll ? allPerDay.find((d) => d.offset === 1) ?? null : selected;
   const dayLabel = (n) => (n > 0 ? `Day +${n}` : `Day ${n}`);
+
+  // --- Save Pattern state ---------------------------------------------------
+  // Three-state UI: null = closed, "open" = name entry, "saving" = in-flight.
+  const [saveDialog, setSaveDialog] = useState(null); // null | "open" | "saving"
+  const [patternName, setPatternName] = useState("");
+  const [saveError, setSaveError] = useState(null);
+  const [saveOk, setSaveOk] = useState(null); // saved pattern id on success
+
+  function openSaveDialog() {
+    setPatternName("");
+    setSaveError(null);
+    setSaveOk(null);
+    setSaveDialog("open");
+  }
+
+  function closeSaveDialog() {
+    setSaveDialog(null);
+    setPatternName("");
+    setSaveError(null);
+  }
+
+  async function confirmSave() {
+    const name = patternName.trim();
+    if (!name) {
+      setSaveError("Please enter a pattern name.");
+      return;
+    }
+    if (!panel) {
+      setSaveError("No panel data available — re-run the study first.");
+      return;
+    }
+    setSaveDialog("saving");
+    setSaveError(null);
+    try {
+      // down_pct from summarizeOffset is a PERCENTAGE (e.g. 68.3), not a
+      // decimal fraction. The backend fall_rate field expects 0.0–1.0, so
+      // we divide by 100 here. This is the ONLY conversion needed.
+      const result = await api.savePattern({
+        name,
+        test_start_date: run.start_date,
+        test_end_date:   run.end_date,
+        cases:           panel.scored,
+        fell_count:      panel.down_count,
+        rose_count:      panel.up_count,
+        fall_rate:       (panel.down_pct ?? 0) / 100,
+        filters:         filters ?? {},
+      });
+      setSaveOk(result?.pattern?.id ?? true);
+      setSaveDialog(null);
+      setPatternName("");
+    } catch (e) {
+      setSaveError(e.message || "Failed to save pattern. Please try again.");
+      setSaveDialog("open"); // re-enable the form
+    }
+  }
 
   return (
     <>
@@ -1065,6 +1121,66 @@ function BandStudyResult({
         </p>
       </div>
 
+      {/* Save Pattern dialog — backdrop + centred card, same z-layer as the
+          filter drawer so it always sits above the report content. */}
+      {(saveDialog === "open" || saveDialog === "saving") && (
+        <div
+          className="drawer-backdrop"
+          style={{ justifyContent: "center", alignItems: "center" }}
+          onClick={(e) => { if (e.target === e.currentTarget) closeSaveDialog(); }}
+        >
+          <div className="card" style={{ width: "min(420px, 94vw)", margin: 0, padding: "24px 24px 20px" }}>
+            <div className="card-title" style={{ marginBottom: 16 }}>
+              Save Pattern
+              <button
+                type="button"
+                className="drawer-close"
+                onClick={closeSaveDialog}
+                disabled={saveDialog === "saving"}
+              >✕</button>
+            </div>
+            <p className="muted" style={{ fontSize: 13, margin: "0 0 14px" }}>
+              Give this filter combination a name. The test dates, case counts, and
+              fall rate are captured automatically from the current report.
+            </p>
+            <label>
+              Pattern name
+              <input
+                id="save-pattern-name"
+                type="text"
+                placeholder="e.g. 19-20% spike, no circuit, sliding-in"
+                value={patternName}
+                onChange={(e) => { setPatternName(e.target.value); setSaveError(null); }}
+                onKeyDown={(e) => { if (e.key === "Enter") confirmSave(); }}
+                disabled={saveDialog === "saving"}
+                autoFocus
+              />
+            </label>
+            {saveError && <div className="inline-error" style={{ marginTop: 8 }}>{saveError}</div>}
+            <div style={{ display: "flex", gap: 10, marginTop: 16, justifyContent: "flex-end" }}>
+              <button
+                type="button"
+                className="small"
+                onClick={closeSaveDialog}
+                disabled={saveDialog === "saving"}
+              >
+                Cancel
+              </button>
+              <button
+                id="save-pattern-confirm"
+                type="button"
+                className="primary small"
+                style={{ marginTop: 0 }}
+                onClick={confirmSave}
+                disabled={saveDialog === "saving"}
+              >
+                {saveDialog === "saving" ? "Saving…" : "Save Pattern"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Every touch, shown separately */}
       <section className="card">
         <div className="card-title">
@@ -1072,10 +1188,26 @@ function BandStudyResult({
             {run.start_date === run.end_date ? run.start_date : `${run.start_date} → ${run.end_date}`} — every{" "}
             {run.direction === "up" ? "spike" : "drop"} that touched {bandLabel(run.band_low, run.band_high)}
           </span>
-          <button type="button" className="small" onClick={onOpenFilters}>
-            Filters &amp; sort
-            {activeFilterCount > 0 && <span className="filter-badge">{activeFilterCount}</span>}
-          </button>
+          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+            {saveOk && (
+              <span className="inline-ok" style={{ margin: 0, fontSize: 12.5 }}>
+                ✓ Pattern #{saveOk} saved
+              </span>
+            )}
+            <button
+              id="save-pattern-btn"
+              type="button"
+              className="small"
+              onClick={openSaveDialog}
+              title="Save this filter combination as a named Pattern"
+            >
+              Save Pattern
+            </button>
+            <button type="button" className="small" onClick={onOpenFilters}>
+              Filters &amp; sort
+              {activeFilterCount > 0 && <span className="filter-badge">{activeFilterCount}</span>}
+            </button>
+          </div>
         </div>
         <p className="muted" style={{ fontSize: 12.5, margin: "0 0 12px" }}>
           Showing <strong>{touches.length}</strong> of {totalCount} touches
