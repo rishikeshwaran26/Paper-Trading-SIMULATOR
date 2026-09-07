@@ -153,4 +153,5 @@ export const api = {
 
   // saved patterns (Pattern Library)
   savePattern: (payload) => request("/patterns", { method: "POST", body: JSON.stringify(payload) }),
+  listPatterns: () => request("/patterns"),
 };
