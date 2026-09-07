@@ -1,3 +1,4 @@
+import { useState, useMemo } from "react";
 import { useApi } from "../useApi.js";
 import { api } from "../api.js";
 import { Loading, ErrorBanner } from "../components/Status.jsx";
@@ -12,6 +13,13 @@ function formatFallRate(rate) {
   if (rate == null) return "—";
   const pctVal = Number(rate) * 100;
   return Number(pctVal.toFixed(2)).toString() + "%";
+}
+
+function compareNewest(a, b) {
+  const timeA = a.created_at ? new Date(a.created_at).getTime() : 0;
+  const timeB = b.created_at ? new Date(b.created_at).getTime() : 0;
+  if (timeB !== timeA) return timeB - timeA;
+  return (b.id || 0) - (a.id || 0);
 }
 
 function formatFilterSummary(filters) {
@@ -90,15 +98,87 @@ function formatFilterSummary(filters) {
 
 export default function PatternLibraryPage() {
   const { data, loading, error, reload } = useApi(() => api.listPatterns(), []);
+  const [sortBy, setSortBy] = useState("newest");
 
   const patterns = data?.patterns ?? [];
 
+  const sortedPatterns = useMemo(() => {
+    const list = [...patterns];
+    if (sortBy === "fall_rate") {
+      list.sort((a, b) => {
+        const diff = (Number(b.fall_rate) || 0) - (Number(a.fall_rate) || 0);
+        if (diff !== 0) return diff;
+        return compareNewest(a, b);
+      });
+    } else if (sortBy === "cases") {
+      list.sort((a, b) => {
+        const diff = (Number(b.cases) || 0) - (Number(a.cases) || 0);
+        if (diff !== 0) return diff;
+        return compareNewest(a, b);
+      });
+    } else {
+      list.sort(compareNewest);
+    }
+    return list;
+  }, [patterns, sortBy]);
+
   return (
     <div className="page">
-      <h1>Pattern Library</h1>
-      <p className="muted" style={{ marginTop: -12, marginBottom: 20 }}>
-        Saved spike patterns and backtested reversion rules.
-      </p>
+      <div
+        style={{
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "flex-start",
+          flexWrap: "wrap",
+          gap: 12,
+          marginBottom: 20,
+        }}
+      >
+        <div>
+          <h1 style={{ margin: "0 0 6px" }}>Pattern Library</h1>
+          <p className="muted" style={{ margin: 0 }}>
+            Saved spike patterns and backtested reversion rules.
+          </p>
+        </div>
+
+        {!loading && !error && patterns.length > 0 && (
+          <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 4 }}>
+            <label
+              htmlFor="pattern-sort"
+              style={{
+                margin: 0,
+                fontSize: 13,
+                color: "var(--muted)",
+                fontWeight: 500,
+                whiteSpace: "nowrap",
+              }}
+            >
+              Sort:
+            </label>
+            <select
+              id="pattern-sort"
+              value={sortBy}
+              onChange={(e) => setSortBy(e.target.value)}
+              style={{
+                width: "auto",
+                margin: 0,
+                padding: "6px 12px",
+                fontSize: 13,
+                fontWeight: 500,
+                cursor: "pointer",
+                background: "var(--panel)",
+                border: "1px solid var(--line)",
+                borderRadius: "var(--radius-sm)",
+                color: "var(--text)",
+              }}
+            >
+              <option value="newest">Newest — default</option>
+              <option value="fall_rate">Fall rate — highest</option>
+              <option value="cases">Cases — highest</option>
+            </select>
+          </div>
+        )}
+      </div>
 
       {loading && <Loading label="Loading saved patterns…" />}
       <ErrorBanner error={error} onRetry={reload} />
@@ -113,7 +193,7 @@ export default function PatternLibraryPage() {
 
       {!loading && !error && patterns.length > 0 && (
         <div className="grid" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(320px, 1fr))" }}>
-          {patterns.map((p) => {
+          {sortedPatterns.map((p) => {
             const dateRange =
               p.test_start_date === p.test_end_date
                 ? p.test_start_date
