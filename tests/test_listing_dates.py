@@ -11,7 +11,7 @@ from api import create_app
 
 def test_parse_listing_date_formats():
     assert universe.parse_listing_date("27-NOV-1995") == "1995-11-27"
-    assert universe.parse_listing_date("05-JAN-2021") == "2021-01-05"
+    assert universe.parse_listing_date("05-JAN-2021") == "2021-01-05"       
     assert universe.parse_listing_date("15-Jan-2024") == "2024-01-15"
     assert universe.parse_listing_date("2023-08-10") == "2023-08-10"
     assert universe.parse_listing_date("12/04/2019") == "2019-04-12"
